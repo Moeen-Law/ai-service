@@ -1,0 +1,3 @@
+"""
+Concrete Adapter Implementations
+"""

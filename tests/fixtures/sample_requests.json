@@ -1,0 +1,42 @@
+{
+    "legal_chat_request": {
+        "task_type": "LEGAL_CHAT",
+        "context": {
+            "jurisdiction": "egypt",
+            "language": "ar",
+            "domain": "civil"
+        },
+        "payload": {
+            "message": "ما هي شروط العقد الصحيح؟",
+            "conversation_history": []
+        }
+    },
+    "document_generation_request": {
+        "task_type": "DOCUMENT_GENERATION",
+        "context": {
+            "jurisdiction": "egypt",
+            "language": "ar",
+            "domain": "commercial"
+        },
+        "payload": {
+            "document_type": "contract",
+            "parameters": {
+                "party_a": "أحمد محمد",
+                "party_b": "شركة XYZ",
+                "subject": "توريد معدات"
+            }
+        }
+    },
+    "contract_analysis_request": {
+        "task_type": "CONTRACT_ANALYSIS",
+        "context": {
+            "jurisdiction": "egypt",
+            "language": "ar",
+            "domain": "commercial"
+        },
+        "payload": {
+            "contract_text": "عقد توريد معدات...",
+            "analysis_type": "risk_assessment"
+        }
+    }
+}
