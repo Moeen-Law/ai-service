@@ -157,27 +157,3 @@ curl -X POST http://localhost:8000/v1/ai/tasks \
     }
   }'
 ```
-
-## 👥 Team Responsibilities
-
-**This Service (AI Backend)**:
-
-- API layer and routing
-- Request/response validation
-- Task orchestration
-- Workflow coordination
-
-**Other Services** (External):
-
-- RAG implementation
-- LLM provider integration
-- Prompt engineering
-- Vector databases
-
-## 📄 License
-
-[Add your license here]
-
-## 🤝 Contributing
-
-[Add contribution guidelines]
