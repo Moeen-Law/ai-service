@@ -5,16 +5,24 @@ Main endpoint for executing AI tasks.
 This layer handles HTTP concerns only - no business logic.
 """
 
-import time
-import uuid
-from typing import Any, Dict
-
-from fastapi import APIRouter, status
+from fastapi import APIRouter, HTTPException, status
 
 from app.api.schemas.common import MetadataSchema
 from app.api.schemas.requests import TaskRequest
 from app.api.schemas.responses import TaskErrorResponse, TaskResponse
-from app.core.domain.enums import TaskStatus, TaskType
+from app.core.domain.enums import TaskStatus
+from app.core.orchestrator import task_orchestrator
+from app.shared.errors.exceptions import (
+    AIServiceError,
+    ContextValidationError,
+    PayloadValidationError,
+    TaskNotSupportedError,
+    ValidationError,
+    WorkflowNotFoundError,
+)
+
+# Import workflows to trigger registration
+import app.core.workflows  # noqa: F401
 
 router = APIRouter(prefix="/ai", tags=["AI Tasks"])
 
@@ -58,54 +66,54 @@ async def execute_task(request: TaskRequest) -> TaskResponse:
     Raises:
         HTTPException: If task validation fails or execution errors occur.
     """
-    start_time = time.time()
-    task_id = str(uuid.uuid4())
+    try:
+        # Execute task through the orchestrator pipeline
+        result = await task_orchestrator.execute(
+            task_type=request.task_type,
+            context_data=request.context.model_dump(),
+            payload=request.payload,
+            options_data=request.options.model_dump() if request.options else None,
+        )
 
-    # TODO: This is a placeholder implementation
-    # The actual implementation will:
-    # 1. Classify task type (already explicit in request)
-    # 2. Validate business rules (via validators)
-    # 3. Select and execute workflow (via orchestrator)
-    # 4. Return structured response
+        # Map domain Result to API TaskResponse
+        return TaskResponse(
+            task_id=str(result.task_id),
+            task_type=result.task_type,
+            status=result.status,
+            result=result.data,
+            metadata=MetadataSchema(
+                execution_time_ms=result.metadata.execution_time_ms,
+                model_used=result.metadata.model_used,
+                tokens_used=result.metadata.tokens_used,
+            ),
+        )
 
-    # For now, return a stub response to prove the API works
-    execution_time_ms = int((time.time() - start_time) * 1000)
+    except (TaskNotSupportedError, WorkflowNotFoundError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": e.code,
+                "message": e.message,
+                "details": e.details,
+            },
+        )
 
-    # Placeholder result based on task type
-    stub_results: Dict[TaskType, Dict[str, Any]] = {
-        TaskType.LEGAL_CHAT: {
-            "message": "هذه استجابة تجريبية. سيتم تنفيذ المنطق الفعلي لاحقاً.",
-            "sources": ["stub_source_1", "stub_source_2"],
-        },
-        TaskType.DOCUMENT_GENERATION: {
-            "document_content": "# مستند تجريبي\n\nمحتوى المستند سيتم توليده لاحقاً.",
-            "format": "markdown",
-        },
-        TaskType.CONTRACT_ANALYSIS: {
-            "risks": [],
-            "summary": "تحليل العقد سيتم تنفيذه لاحقاً.",
-            "recommendations": [],
-        },
-        TaskType.CONTRACT_REFRAMING: {
-            "reframed_clause": "البند المعاد صياغته سيظهر هنا.",
-            "changes_summary": "ملخص التغييرات سيتم توليده لاحقاً.",
-        },
-        TaskType.CASE_EVALUATION: {
-            "evaluation": "تقييم القضية سيتم تنفيذه لاحقاً.",
-            "strengths": [],
-            "weaknesses": [],
-            "recommendation": "التوصية ستظهر هنا.",
-        },
-    }
+    except (ContextValidationError, PayloadValidationError, ValidationError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": e.code,
+                "message": e.message,
+                "details": e.details,
+            },
+        )
 
-    return TaskResponse(
-        task_id=task_id,
-        task_type=request.task_type,
-        status=TaskStatus.SUCCESS,
-        result=stub_results.get(request.task_type, {}),
-        metadata=MetadataSchema(
-            execution_time_ms=execution_time_ms,
-            model_used="stub",
-            tokens_used=0,
-        ),
-    )
+    except AIServiceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": e.code,
+                "message": e.message,
+                "details": e.details,
+            },
+        )

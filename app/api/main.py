@@ -11,10 +11,21 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.api.middleware import RequestIDMiddleware
 from app.api.routes import health, tasks
 from app.api.schemas.common import ErrorDetail, ErrorResponse
 from app.api.schemas.responses import TaskErrorResponse
 from app.infrastructure.config.settings import get_settings
+from app.infrastructure.logging.logger import configure_logging, get_logger
+
+# Configure logging on module import
+settings = get_settings()
+configure_logging(
+    level="DEBUG" if settings.DEBUG else "INFO",
+    json_format=settings.is_production,
+)
+
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -26,14 +37,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     # Startup
     settings = get_settings()
-    print(f"Starting {settings.SERVICE_NAME} v{settings.VERSION}")
-    print(f"Environment: {settings.ENVIRONMENT}")
-    print(f"Debug mode: {settings.DEBUG}")
+    logger.info(
+        "Application starting",
+        service=settings.SERVICE_NAME,
+        version=settings.VERSION,
+        environment=settings.ENVIRONMENT,
+        debug=settings.DEBUG,
+    )
 
     yield
 
     # Shutdown
-    print(f"Shutting down {settings.SERVICE_NAME}")
+    logger.info("Application shutting down", service=settings.SERVICE_NAME)
 
 
 def create_app() -> FastAPI:
@@ -58,6 +73,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Register middleware
+    register_middleware(app)
+
     # Register exception handlers
     register_exception_handlers(app)
 
@@ -65,6 +83,16 @@ def create_app() -> FastAPI:
     register_routes(app)
 
     return app
+
+
+def register_middleware(app: FastAPI) -> None:
+    """
+    Register application middleware.
+
+    Middleware is applied in reverse order (last added = first executed).
+    """
+    # Request ID middleware - extracts/generates request IDs
+    app.add_middleware(RequestIDMiddleware)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -90,6 +118,12 @@ def register_exception_handlers(app: FastAPI) -> None:
                 )
             )
 
+        logger.warning(
+            "Validation error",
+            path=str(request.url.path),
+            errors=[d.model_dump() for d in details],
+        )
+
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content=TaskErrorResponse(
@@ -108,6 +142,12 @@ def register_exception_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         """Handle unexpected exceptions."""
         settings = get_settings()
+
+        logger.exception(
+            "Unhandled exception",
+            path=str(request.url.path),
+            exception_type=type(exc).__name__,
+        )
 
         # In development, include exception details
         message = (

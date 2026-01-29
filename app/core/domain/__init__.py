@@ -2,6 +2,13 @@
 Domain Models - Core business entities and enums.
 """
 
+from app.core.domain.entities import (
+    Context,
+    ExecutionOptions,
+    Result,
+    ResultMetadata,
+    Task,
+)
 from app.core.domain.enums import (
     Jurisdiction,
     Language,
@@ -11,9 +18,16 @@ from app.core.domain.enums import (
 )
 
 __all__ = [
+    # Enums
     "TaskType",
     "TaskStatus",
     "Jurisdiction",
     "Language",
     "LegalDomain",
+    # Entities
+    "Task",
+    "Context",
+    "ExecutionOptions",
+    "Result",
+    "ResultMetadata",
 ]
