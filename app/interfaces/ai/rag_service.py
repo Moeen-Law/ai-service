@@ -3,6 +3,7 @@ RAG Service Interface
 
 Abstract interface defining the contract for RAG service interactions.
 This is a port in the hexagonal architecture pattern.
+Supports hybrid retrieval (vector + BM25) with article cache.
 """
 
 from abc import ABC, abstractmethod
@@ -56,7 +57,18 @@ class RAGServiceInterface(ABC):
 
     Defines the contract for retrieving relevant documents
     from a knowledge base based on queries and context.
+    Supports hybrid retrieval (vector + BM25), article caching,
+    and semantic domain classification.
     """
+
+    @abstractmethod
+    async def initialize(self) -> None:
+        """
+        Initialize the RAG service (connect to DB, load docs, build indexes).
+
+        Should be called once at application startup.
+        """
+        pass
 
     @abstractmethod
     async def retrieve(self, query: RAGQuery) -> RAGResponse:
@@ -71,6 +83,66 @@ class RAGServiceInterface(ABC):
 
         Raises:
             RAGServiceError: If the RAG service call fails
+        """
+        pass
+
+    @abstractmethod
+    async def hybrid_retrieve(
+        self,
+        clean_query: str,
+        expanded_query: str,
+        domain: Optional[str] = None,
+        k: int = 15,
+    ) -> List[Document]:
+        """
+        Hybrid retrieval: vector search (clean_query) + BM25 (expanded_query),
+        merged via Reciprocal Rank Fusion.
+
+        Args:
+            clean_query: Original user question for semantic search
+            expanded_query: LLM-expanded keywords for BM25 lexical search
+            domain: Preferred legal domain for priority filtering
+            k: Number of documents to fetch from each retriever
+
+        Returns:
+            List of Documents sorted by RRF score
+        """
+        pass
+
+    @abstractmethod
+    def lookup_article(
+        self,
+        article_number: str,
+        domain: Optional[str] = None,
+    ) -> List[Document]:
+        """
+        Look up articles by number from the article cache.
+
+        Args:
+            article_number: The article number to look up
+            domain: Optional domain filter (None = all domains)
+
+        Returns:
+            List of matching Documents (same number can exist in multiple laws)
+        """
+        pass
+
+    @abstractmethod
+    def detect_domain_semantic(
+        self,
+        question: str,
+        threshold: float = 0.6,
+    ) -> Optional[str]:
+        """
+        Classify a question's legal domain via cosine similarity
+        against prototype domain embeddings.
+
+        Args:
+            question: The user question to classify
+            threshold: Minimum similarity threshold
+
+        Returns:
+            Domain name string or None if below threshold
         """
         pass
 

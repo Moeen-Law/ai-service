@@ -1,17 +1,22 @@
 """
 AI Task Routes
 
-Main endpoint for executing AI tasks.
+Main endpoint for executing AI tasks + SSE streaming for LEGAL_CHAT.
 This layer handles HTTP concerns only - no business logic.
 """
 
+import json
+
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from app.api.schemas.common import MetadataSchema
 from app.api.schemas.requests import TaskRequest
 from app.api.schemas.responses import TaskErrorResponse, TaskResponse
-from app.core.domain.enums import TaskStatus
+from app.core.domain.enums import TaskStatus, TaskType
 from app.core.orchestrator import task_orchestrator
+from app.core.workflows.legal_chat import LegalChatWorkflow
+from app.core.workflows.registry import workflow_registry
 from app.shared.errors.exceptions import (
     AIServiceError,
     ContextValidationError,
@@ -117,3 +122,56 @@ async def execute_task(request: TaskRequest) -> TaskResponse:
                 "details": e.details,
             },
         )
+
+
+@router.post(
+    "/tasks/stream",
+    summary="Stream AI Task (SSE)",
+    description=(
+        "Server-Sent Events endpoint for LEGAL_CHAT streaming. "
+        "Sends token-by-token responses followed by sources and [DONE]."
+    ),
+)
+async def stream_task(request: TaskRequest) -> StreamingResponse:
+    """
+    Stream an AI task response using Server-Sent Events.
+
+    Currently only LEGAL_CHAT supports streaming.  Other task types
+    fall back to a single SSE event containing the full result.
+
+    SSE event types:
+    - ``token``: individual LLM token
+    - ``sources``: JSON array of cited sources + timing
+    - ``done``: signals the end of the stream (data = ``[DONE]``)
+    - ``error``: error message
+    """
+    if request.task_type != TaskType.LEGAL_CHAT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "STREAMING_NOT_SUPPORTED",
+                "message": f"Streaming is only supported for LEGAL_CHAT, got {request.task_type.value}",
+            },
+        )
+
+    workflow: LegalChatWorkflow = workflow_registry.get(TaskType.LEGAL_CHAT)  # type: ignore[assignment]
+
+    async def _event_generator():
+        try:
+            async for event in workflow.stream(
+                question=request.payload.get("message", ""),
+            ):
+                yield event
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

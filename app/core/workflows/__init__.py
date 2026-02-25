@@ -10,11 +10,14 @@ from app.core.workflows.contract_reframing import ContractReframingWorkflow
 from app.core.workflows.document_generation import DocumentGenerationWorkflow
 from app.core.workflows.legal_chat import LegalChatWorkflow
 from app.core.workflows.registry import WorkflowRegistry, workflow_registry
+from app.infrastructure.adapters import llm_service, prompt_service, rag_service
 
 
 def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
     """
     Register all workflow implementations with the registry.
+
+    Each workflow receives the shared adapter singletons via constructor DI.
 
     Args:
         registry: The registry to use (defaults to global instance)
@@ -22,11 +25,26 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
     reg = registry or workflow_registry
 
     # Register each workflow for its corresponding task type
-    reg.register(TaskType.LEGAL_CHAT, LegalChatWorkflow())
-    reg.register(TaskType.DOCUMENT_GENERATION, DocumentGenerationWorkflow())
-    reg.register(TaskType.CONTRACT_ANALYSIS, ContractAnalysisWorkflow())
-    reg.register(TaskType.CONTRACT_REFRAMING, ContractReframingWorkflow())
-    reg.register(TaskType.CASE_EVALUATION, CaseEvaluationWorkflow())
+    reg.register(
+        TaskType.LEGAL_CHAT,
+        LegalChatWorkflow(rag_service, llm_service, prompt_service),
+    )
+    reg.register(
+        TaskType.DOCUMENT_GENERATION,
+        DocumentGenerationWorkflow(rag_service, llm_service, prompt_service),
+    )
+    reg.register(
+        TaskType.CONTRACT_ANALYSIS,
+        ContractAnalysisWorkflow(rag_service, llm_service, prompt_service),
+    )
+    reg.register(
+        TaskType.CONTRACT_REFRAMING,
+        ContractReframingWorkflow(rag_service, llm_service, prompt_service),
+    )
+    reg.register(
+        TaskType.CASE_EVALUATION,
+        CaseEvaluationWorkflow(rag_service, llm_service, prompt_service),
+    )
 
 
 # Auto-register workflows when module is imported

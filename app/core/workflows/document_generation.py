@@ -1,8 +1,7 @@
 """
 Document Generation Workflow
 
-Stubbed workflow for generating legal documents.
-Returns deterministic mock responses for testing.
+Generates legal documents using RAG-retrieved templates/articles and LLM.
 """
 
 import time
@@ -11,16 +10,39 @@ from uuid import UUID
 
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import TaskType
+from app.core.services.query_pipeline import QueryPipeline
 from app.core.workflows.base import BaseWorkflow
+from app.infrastructure.logging.logger import get_logger
+from app.interfaces.ai.llm_service import LLMRequest, LLMServiceInterface
+from app.interfaces.ai.prompt_service import PromptServiceInterface
+from app.interfaces.ai.rag_service import RAGServiceInterface
+
+logger = get_logger(__name__)
 
 
 class DocumentGenerationWorkflow(BaseWorkflow):
     """
     Workflow for DOCUMENT_GENERATION task type.
 
-    Generates legal documents from templates and parameters.
-    Currently returns stubbed responses for testing.
+    Pipeline:
+    1. Retrieve relevant legal articles via QueryPipeline
+    2. Assemble document-generation prompt
+    3. LLM generates the document
     """
+
+    def __init__(
+        self,
+        rag_service: RAGServiceInterface,
+        llm_service: LLMServiceInterface,
+        prompt_service: PromptServiceInterface,
+    ) -> None:
+        self._rag = rag_service
+        self._llm = llm_service
+        self._prompt = prompt_service
+        self._pipeline = QueryPipeline(
+            rag_service=rag_service,
+            llm_service=llm_service,
+        )
 
     @property
     def name(self) -> str:
@@ -33,21 +55,42 @@ class DocumentGenerationWorkflow(BaseWorkflow):
         payload: Dict[str, Any],
         options: Optional[ExecutionOptions] = None,
     ) -> Result:
-        """
-        Execute the document generation workflow.
-
-        In the real implementation, this would:
-        1. Call RAG service to retrieve document template
-        2. Call Prompt service to assemble generation instructions
-        3. Call LLM service to populate template
-        4. Format and return generated document
-        """
         start_time = time.time()
 
         document_type = payload.get("document_type", "document")
         parameters = payload.get("parameters", {})
 
-        response_data = self._generate_stub_document(document_type, parameters, context)
+        # 1. Retrieve relevant articles for the document type
+        search_query = f"إنشاء مستند قانوني: {document_type}"
+        if parameters.get("subject"):
+            search_query += f" - {parameters['subject']}"
+        pipeline_result = await self._pipeline.run(question=search_query, retrieval_k=6)
+
+        # 2. Assemble prompt
+        template = await self._prompt.get_template(
+            task_type="DOCUMENT_GENERATION",
+            jurisdiction=context.jurisdiction.value,
+            language=context.language.value,
+        )
+        assembled = await self._prompt.assemble_prompt(
+            template=template,
+            variables={
+                "document_type": document_type,
+                "parameters": str(parameters),
+                "context": pipeline_result.context or "لا توجد مواد قانونية متاحة",
+            },
+        )
+
+        # 3. Generate
+        resp = await self._llm.generate(LLMRequest(prompt=assembled.prompt))
+        content = resp.content
+
+        # 4. Build response
+        response_data = {
+            "document_content": content,
+            "format": "markdown",
+            "sources": pipeline_result.sources[:7],
+        }
 
         execution_time_ms = int((time.time() - start_time) * 1000)
 
@@ -57,70 +100,7 @@ class DocumentGenerationWorkflow(BaseWorkflow):
             data=response_data,
             metadata=ResultMetadata(
                 execution_time_ms=execution_time_ms,
-                model_used="stub-model",
-                tokens_used=500,
+                model_used=resp.model,
+                tokens_used=resp.tokens_used,
             ),
         )
-
-    def _generate_stub_document(
-        self,
-        document_type: str,
-        parameters: Dict[str, Any],
-        context: Context,
-    ) -> Dict[str, Any]:
-        """Generate a stubbed document based on input."""
-        party_a = parameters.get("party_a", "الطرف الأول")
-        party_b = parameters.get("party_b", "الطرف الثاني")
-        subject = parameters.get("subject", "موضوع العقد")
-
-        if context.language.value == "ar":
-            content = f"""# {document_type.upper()}
-
-## عقد {subject}
-
-**الأطراف:**
-- الطرف الأول: {party_a}
-- الطرف الثاني: {party_b}
-
-**البنود:**
-
-### البند الأول: موضوع العقد
-يتفق الطرفان على {subject} وفقاً للشروط المحددة أدناه.
-
-### البند الثاني: مدة العقد
-يسري هذا العقد من تاريخ التوقيع ولمدة عام كامل.
-
-### البند الثالث: الالتزامات
-[محتوى تجريبي - سيتم استبداله في النسخة النهائية]
-
----
-*هذا مستند تجريبي. سيتم توليد المحتوى الفعلي في النسخة النهائية.*
-"""
-        else:
-            content = f"""# {document_type.upper()}
-
-## {subject} Agreement
-
-**Parties:**
-- First Party: {party_a}
-- Second Party: {party_b}
-
-**Terms:**
-
-### Article 1: Subject Matter
-Both parties agree to {subject} according to the terms specified below.
-
-### Article 2: Duration
-This contract is effective from the signing date for a period of one year.
-
-### Article 3: Obligations
-[Stub content - will be replaced in final version]
-
----
-*This is a stub document. Actual content will be generated in the final version.*
-"""
-
-        return {
-            "document_content": content,
-            "format": "markdown",
-        }

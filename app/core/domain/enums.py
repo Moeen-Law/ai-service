@@ -65,11 +65,19 @@ class Language(str, Enum):
 class LegalDomain(str, Enum):
     """
     Legal domain categories.
+
+    Aligned with the Egyptian law database domains.
     """
 
     CIVIL = "civil"
-    CRIMINAL = "criminal"
+    PENAL = "penal"
     COMMERCIAL = "commercial"
     LABOR = "labor"
-    FAMILY = "family"
-    ADMINISTRATIVE = "administrative"
+    CONSTITUTION = "constitution"
+    CRIMINAL_PROCEDURE = "criminal_procedure"
+    PERSONAL = "personal"
+    CHILD = "child"
+    CONSUMER = "consumer"
+    CYBER = "cyber"
+    EDUCATION = "education"
+    RENT = "rent"

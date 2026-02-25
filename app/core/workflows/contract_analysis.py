@@ -1,8 +1,7 @@
 """
 Contract Analysis Workflow
 
-Stubbed workflow for analyzing contract content.
-Returns deterministic mock responses for testing.
+Analyses contracts using RAG-retrieved legal articles and LLM risk assessment.
 """
 
 import time
@@ -11,16 +10,39 @@ from uuid import UUID
 
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import TaskType
+from app.core.services.query_pipeline import QueryPipeline
 from app.core.workflows.base import BaseWorkflow
+from app.infrastructure.logging.logger import get_logger
+from app.interfaces.ai.llm_service import LLMRequest, LLMServiceInterface
+from app.interfaces.ai.prompt_service import PromptServiceInterface
+from app.interfaces.ai.rag_service import RAGServiceInterface
+
+logger = get_logger(__name__)
 
 
 class ContractAnalysisWorkflow(BaseWorkflow):
     """
     Workflow for CONTRACT_ANALYSIS task type.
 
-    Analyzes contract content for risks and issues.
-    Currently returns stubbed responses for testing.
+    Pipeline:
+    1. Retrieve relevant legal articles via QueryPipeline
+    2. Assemble a contract-analysis prompt
+    3. LLM generates risk analysis
     """
+
+    def __init__(
+        self,
+        rag_service: RAGServiceInterface,
+        llm_service: LLMServiceInterface,
+        prompt_service: PromptServiceInterface,
+    ) -> None:
+        self._rag = rag_service
+        self._llm = llm_service
+        self._prompt = prompt_service
+        self._pipeline = QueryPipeline(
+            rag_service=rag_service,
+            llm_service=llm_service,
+        )
 
     @property
     def name(self) -> str:
@@ -33,23 +55,41 @@ class ContractAnalysisWorkflow(BaseWorkflow):
         payload: Dict[str, Any],
         options: Optional[ExecutionOptions] = None,
     ) -> Result:
-        """
-        Execute the contract analysis workflow.
-
-        In the real implementation, this would:
-        1. Call RAG service to retrieve analysis guidelines
-        2. Call Prompt service to structure analysis instructions
-        3. Call LLM service to perform analysis
-        4. Structure findings by risk level
-        """
         start_time = time.time()
 
         contract_text = payload.get("contract_text", "")
         analysis_type = payload.get("analysis_type", "risk_assessment")
 
-        response_data = self._generate_stub_analysis(
-            contract_text, analysis_type, context
+        # 1. Retrieve relevant articles based on contract content
+        search_query = f"تحليل عقد: {contract_text[:400]}"
+        pipeline_result = await self._pipeline.run(question=search_query, retrieval_k=6)
+
+        # 2. Assemble prompt
+        template = await self._prompt.get_template(
+            task_type="CONTRACT_ANALYSIS",
+            jurisdiction=context.jurisdiction.value,
+            language=context.language.value,
         )
+        assembled = await self._prompt.assemble_prompt(
+            template=template,
+            variables={
+                "contract_text": contract_text,
+                "analysis_type": analysis_type,
+                "context": pipeline_result.context or "لا توجد مواد قانونية متاحة",
+            },
+        )
+
+        # 3. Generate
+        resp = await self._llm.generate(LLMRequest(prompt=assembled.prompt))
+        answer = resp.content
+
+        # 4. Build response
+        response_data = {
+            "risks": self._extract_risks(answer),
+            "summary": answer,
+            "recommendations": self._extract_recommendations(answer),
+            "sources": pipeline_result.sources[:7],
+        }
 
         execution_time_ms = int((time.time() - start_time) * 1000)
 
@@ -59,95 +99,48 @@ class ContractAnalysisWorkflow(BaseWorkflow):
             data=response_data,
             metadata=ResultMetadata(
                 execution_time_ms=execution_time_ms,
-                model_used="stub-model",
-                tokens_used=len(contract_text.split()) * 2,
+                model_used=resp.model,
+                tokens_used=resp.tokens_used,
             ),
         )
 
-    def _generate_stub_analysis(
-        self,
-        contract_text: str,
-        analysis_type: str,
-        context: Context,
-    ) -> Dict[str, Any]:
-        """Generate a stubbed analysis based on input."""
-        if context.language.value == "ar":
-            return {
-                "risks": [
-                    {
-                        "clause": "البند 3.2",
-                        "risk_level": "high",
-                        "description": (
-                            "بند الإنهاء المبكر يفتقر إلى تحديد فترة إشعار واضحة. "
-                            "يُنصح بإضافة فترة إشعار محددة."
-                        ),
-                    },
-                    {
-                        "clause": "البند 5.1",
-                        "risk_level": "medium",
-                        "description": (
-                            "شرط التحكيم لا يحدد مقر التحكيم. "
-                            "يُفضل تحديد المقر لتجنب النزاعات."
-                        ),
-                    },
-                    {
-                        "clause": "البند 7.3",
-                        "risk_level": "low",
-                        "description": (
-                            "صياغة بند السرية عامة. "
-                            "يُنصح بتحديد المعلومات السرية بدقة أكبر."
-                        ),
-                    },
-                ],
-                "summary": (
-                    f"تم تحليل العقد باستخدام منهجية {analysis_type}. "
-                    f"تم اكتشاف 3 نقاط تحتاج إلى مراجعة: "
-                    "1 عالية المخاطر، 1 متوسطة، 1 منخفضة. "
-                    "[هذا تحليل تجريبي]"
-                ),
-                "recommendations": [
-                    "إضافة فترة إشعار واضحة في بند الإنهاء",
-                    "تحديد مقر التحكيم في شرط التحكيم",
-                    "توضيح نطاق المعلومات السرية",
-                ],
-            }
+    @staticmethod
+    def _extract_risks(answer: str) -> List[Dict[str, str]]:
+        """Best-effort extraction of risk items from the LLM answer."""
+        risks: List[Dict[str, str]] = []
+        lines = answer.split("\n")
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            risk_level = "medium"
+            if "عالي" in stripped or "خطير" in stripped:
+                risk_level = "high"
+            elif "منخفض" in stripped or "بسيط" in stripped:
+                risk_level = "low"
 
-        return {
-            "risks": [
-                {
-                    "clause": "Section 3.2",
-                    "risk_level": "high",
-                    "description": (
-                        "Early termination clause lacks clear notice period. "
-                        "Recommend adding a specific notice period."
-                    ),
-                },
-                {
-                    "clause": "Section 5.1",
-                    "risk_level": "medium",
-                    "description": (
-                        "Arbitration clause does not specify seat of arbitration. "
-                        "Recommend specifying to avoid disputes."
-                    ),
-                },
-                {
-                    "clause": "Section 7.3",
-                    "risk_level": "low",
-                    "description": (
-                        "Confidentiality clause is broadly worded. "
-                        "Recommend defining confidential information more precisely."
-                    ),
-                },
-            ],
-            "summary": (
-                f"Contract analyzed using {analysis_type} methodology. "
-                f"Found 3 items requiring review: "
-                "1 high risk, 1 medium, 1 low. "
-                "[This is a stub analysis]"
-            ),
-            "recommendations": [
-                "Add clear notice period in termination clause",
-                "Specify seat of arbitration in arbitration clause",
-                "Clarify scope of confidential information",
-            ],
-        }
+            if stripped.startswith(("-", "•", "١", "٢", "٣", "٤", "٥")) and (
+                "خطر" in stripped or "مخاطر" in stripped or "risk" in stripped.lower()
+            ):
+                risks.append(
+                    {
+                        "clause": "",
+                        "risk_level": risk_level,
+                        "description": stripped.lstrip("-•١٢٣٤٥٦٧٨٩٠. "),
+                    }
+                )
+        return risks
+
+    @staticmethod
+    def _extract_recommendations(answer: str) -> List[str]:
+        """Best-effort extraction of recommendations from the LLM answer."""
+        recs: List[str] = []
+        in_recs = False
+        for line in answer.split("\n"):
+            stripped = line.strip()
+            if "توصي" in stripped or "التوصيات" in stripped:
+                in_recs = True
+                continue
+            if in_recs and stripped.startswith(("-", "•", "١", "٢", "٣", "٤", "٥")):
+                recs.append(stripped.lstrip("-•١٢٣٤٥٦٧٨٩٠. "))
+        return recs

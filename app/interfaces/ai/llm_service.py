@@ -87,6 +87,19 @@ class LLMServiceInterface(ABC):
         pass
 
     @abstractmethod
+    async def astream(self, prompt: str):
+        """
+        Stream LLM response tokens asynchronously.
+
+        Args:
+            prompt: The formatted prompt to send to the LLM
+
+        Yields:
+            String tokens as they are generated
+        """
+        pass
+
+    @abstractmethod
     async def health_check(self) -> bool:
         """
         Check if the LLM service is available.

@@ -47,6 +47,28 @@ class Settings(BaseSettings):
     MAX_REQUEST_SIZE_MB: int = 10
     REQUEST_TIMEOUT_SECONDS: int = 30
 
+    # --- AI / LLM Configuration ---
+    GEMINI_API_KEY: str = ""
+    LLM_MODEL: str = "gemini-2.0-flash"
+    LLM_TEMPERATURE: float = 0.0
+
+    # --- Qdrant Vector Database ---
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_PORT: int = 443
+    QDRANT_API_KEY: str = ""
+    QDRANT_COLLECTION_NAME: str = "egyptian_law_scraped"
+
+    # --- Embedding Configuration ---
+    EMBEDDING_MODEL: str = "intfloat/multilingual-e5-base"
+    EMBEDDING_DIMENSION: int = 768
+    EMBEDDING_DEVICE: str = "cpu"
+
+    # --- Hybrid RAG Configuration ---
+    VECTOR_WEIGHT: float = 0.8
+    BM25_WEIGHT: float = 0.2
+    RETRIEVAL_K: int = 4
+    MAX_FRONTEND_SOURCES: int = 7
+
     @property
     def is_development(self) -> bool:
         """Check if running in development mode."""

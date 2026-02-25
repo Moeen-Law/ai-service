@@ -15,6 +15,7 @@ from app.api.middleware import RequestIDMiddleware
 from app.api.routes import health, tasks
 from app.api.schemas.common import ErrorDetail, ErrorResponse
 from app.api.schemas.responses import TaskErrorResponse
+from app.infrastructure.adapters import rag_service
 from app.infrastructure.config.settings import get_settings
 from app.infrastructure.logging.logger import configure_logging, get_logger
 
@@ -44,6 +45,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         environment=settings.ENVIRONMENT,
         debug=settings.DEBUG,
     )
+
+    # Initialise the RAG service (scroll docs, build caches, BM25, domain prototypes)
+    logger.info("Initialising RAG service …")
+    await rag_service.initialize()
+    logger.info("RAG service ready")
 
     yield
 

@@ -1,8 +1,8 @@
 """
-Stub Prompt Service Adapter
+Legal Prompt Service Adapter
 
-Fake implementation of Prompt service for testing and development.
-Returns canned prompt templates without calling any real prompt store.
+Production prompt service for Egyptian legal AI assistant (مُعين).
+Contains the real Arabic legal prompt templates and the LLM query-rewriting prompt.
 """
 
 from typing import Any, Dict, List, Optional
@@ -13,93 +13,131 @@ from app.interfaces.ai.prompt_service import (
     PromptTemplate,
 )
 
+# ---------------------------------------------------------------------------
+# Core system prompt — shared across all legal workflows
+# ---------------------------------------------------------------------------
+_MOEIN_SYSTEM_PROMPT = (
+    'أنت "مُعين"، مساعد قانوني مصري ذكي متخصص في القانون المصري.\n\n'
+    "استخدم المواد القانونية التالية للإجابة على سؤال المستخدم بدقة ووضوح:\n\n"
+    "**تعليمات هامة:**\n"
+    "1. إذا وجدت مواد قانونية تجيب على السؤال مباشرة، استخدمها بالكامل\n"
+    '2. إذا كانت المواد تشير إلى مواد أخرى (مثل "تطبق أحكام المواد 240 و241 و242")، اذكر ذلك بوضوح\n'
+    "3. قدم الإجابة بشكل واضح مع ذكر رقم المادة واسم القانون بالكامل\n"
+    "4. إذا لم تجد إجابة مباشرة، لا تخترع معلومات - قل ذلك بوضوح\n"
+    "5. ركز على المواد من قانون العقوبات إذا كان السؤال عن جرائم أو عقوبات\n"
+)
 
-class StubPromptService(PromptServiceInterface):
+# ---------------------------------------------------------------------------
+# Prompt templates per task type
+# ---------------------------------------------------------------------------
+_TEMPLATES: Dict[str, PromptTemplate] = {
+    "LEGAL_CHAT": PromptTemplate(
+        id="legal-chat-v2",
+        name="Legal Chat — مُعين",
+        template=(
+            "{system_prompt}\n\n"
+            "المواد القانونية المتوفرة:\n{context}\n\n"
+            "السؤال:\n{question}\n\n"
+            "الإجابة:\n"
+        ),
+        variables=["system_prompt", "context", "question"],
+        description="Full legal chat prompt with context and system instructions",
+    ),
+    "CASE_EVALUATION": PromptTemplate(
+        id="case-eval-v2",
+        name="Case Evaluation — مُعين",
+        template=(
+            "{system_prompt}\n\n"
+            "المواد القانونية ذات الصلة:\n{context}\n\n"
+            "وصف القضية:\n{case_description}\n\n"
+            "المطلوب: قم بتقييم القضية من الناحية القانونية وحدد:\n"
+            "1. نقاط القوة\n"
+            "2. نقاط الضعف\n"
+            "3. التوصية القانونية\n\n"
+            "التقييم:\n"
+        ),
+        variables=["system_prompt", "context", "case_description"],
+        description="Case evaluation with strengths/weaknesses analysis",
+    ),
+    "CONTRACT_ANALYSIS": PromptTemplate(
+        id="contract-analysis-v2",
+        name="Contract Analysis — مُعين",
+        template=(
+            "{system_prompt}\n\n"
+            "المواد القانونية ذات الصلة:\n{context}\n\n"
+            "نص العقد المراد تحليله:\n{contract_text}\n\n"
+            "نوع التحليل: {analysis_type}\n\n"
+            "المطلوب: حلل العقد وحدد:\n"
+            "1. المخاطر القانونية مع مستوى كل خطر (عالي/متوسط/منخفض)\n"
+            "2. ملخص التحليل\n"
+            "3. التوصيات\n\n"
+            "التحليل:\n"
+        ),
+        variables=["system_prompt", "context", "contract_text", "analysis_type"],
+        description="Contract risk analysis prompt",
+    ),
+    "CONTRACT_REFRAMING": PromptTemplate(
+        id="contract-reframe-v2",
+        name="Contract Reframing — مُعين",
+        template=(
+            "{system_prompt}\n\n"
+            "المواد القانونية ذات الصلة:\n{context}\n\n"
+            "البند الأصلي:\n{clause_text}\n\n"
+            "المنظور المطلوب: {target_perspective}\n\n"
+            "المطلوب: أعد صياغة البند مع:\n"
+            "1. الحفاظ على المعنى القانوني الأساسي\n"
+            "2. تعديل الصياغة لتناسب المنظور المطلوب\n"
+            "3. ملخص التغييرات\n\n"
+            "البند المعاد صياغته:\n"
+        ),
+        variables=["system_prompt", "context", "clause_text", "target_perspective"],
+        description="Contract clause reframing prompt",
+    ),
+    "DOCUMENT_GENERATION": PromptTemplate(
+        id="doc-gen-v2",
+        name="Document Generation — مُعين",
+        template=(
+            "{system_prompt}\n\n"
+            "المواد القانونية ذات الصلة:\n{context}\n\n"
+            "نوع المستند: {document_type}\n"
+            "المعلومات:\n{parameters}\n\n"
+            "المطلوب: قم بإنشاء المستند القانوني بصياغة مهنية ودقيقة.\n\n"
+            "المستند:\n"
+        ),
+        variables=["system_prompt", "context", "document_type", "parameters"],
+        description="Legal document generation prompt",
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# LLM query-rewriting prompt (used by the query pipeline)
+# ---------------------------------------------------------------------------
+QUERY_REWRITE_PROMPT = (
+    "You are an Egyptian legal expert. Analyze the following question "
+    "and respond ONLY with valid JSON matching this exact schema:\n\n"
+    "{\n"
+    '  "domain": "<one of: penal | civil | labor | constitution | commercial | criminal_procedure | null>",\n'
+    '  "keywords": ["<formal Arabic legal keyword>", "..."],\n'
+    '  "likely_articles": ["<article number string>", "..."]\n'
+    "}\n\n"
+    "Rules:\n"
+    "- domain: single best Egyptian law domain for this question; use null if unclear.\n"
+    "- keywords: 8-15 formal Arabic legal terms / concepts relevant to the question. "
+    "Do NOT include numbers representing durations or monetary amounts.\n"
+    "- likely_articles: article numbers you are confident directly address this "
+    "situation (e.g. '163', '240'). Use empty list if uncertain.\n\n"
+    "Question: {question}\n\n"
+    "JSON:"
+)
+
+
+class LegalPromptService(PromptServiceInterface):
     """
-    Stub implementation of Prompt service.
+    Production prompt service for Egyptian legal workflows.
 
-    Returns deterministic canned prompt templates for testing.
-    Can be easily replaced with real implementation later.
+    Provides the real Arabic مُعين prompts and supports
+    query rewriting via the QUERY_REWRITE_PROMPT.
     """
-
-    # Sample templates for different task types
-    _TEMPLATES: Dict[str, PromptTemplate] = {
-        "LEGAL_CHAT": PromptTemplate(
-            id="legal-chat-v1",
-            name="Legal Chat Template",
-            template=(
-                "You are a legal assistant specializing in {jurisdiction} law.\n"
-                "Language: {language}\n\n"
-                "Context:\n{context}\n\n"
-                "Question: {question}\n\n"
-                "Provide a helpful legal response."
-            ),
-            variables=["jurisdiction", "language", "context", "question"],
-            description="Template for legal chat interactions",
-        ),
-        "DOCUMENT_GENERATION": PromptTemplate(
-            id="doc-gen-v1",
-            name="Document Generation Template",
-            template=(
-                "Generate a {document_type} document for {jurisdiction}.\n"
-                "Language: {language}\n\n"
-                "Parameters:\n{parameters}\n\n"
-                "Generate the document content."
-            ),
-            variables=["document_type", "jurisdiction", "language", "parameters"],
-            description="Template for document generation",
-        ),
-        "CONTRACT_ANALYSIS": PromptTemplate(
-            id="contract-analysis-v1",
-            name="Contract Analysis Template",
-            template=(
-                "Analyze the following contract under {jurisdiction} law.\n"
-                "Analysis type: {analysis_type}\n"
-                "Language: {language}\n\n"
-                "Contract:\n{contract_text}\n\n"
-                "Provide detailed analysis."
-            ),
-            variables=["jurisdiction", "analysis_type", "language", "contract_text"],
-            description="Template for contract analysis",
-        ),
-        "CONTRACT_REFRAMING": PromptTemplate(
-            id="contract-reframe-v1",
-            name="Contract Reframing Template",
-            template=(
-                "Reframe the following clause with {perspective} perspective.\n"
-                "Jurisdiction: {jurisdiction}\n"
-                "Language: {language}\n\n"
-                "Original clause:\n{clause_text}\n\n"
-                "Provide reframed version."
-            ),
-            variables=["perspective", "jurisdiction", "language", "clause_text"],
-            description="Template for contract reframing",
-        ),
-        "CASE_EVALUATION": PromptTemplate(
-            id="case-eval-v1",
-            name="Case Evaluation Template",
-            template=(
-                "Evaluate the following case under {jurisdiction} law.\n"
-                "Domain: {domain}\n"
-                "Language: {language}\n\n"
-                "Case description:\n{case_description}\n\n"
-                "Provide evaluation with strengths and weaknesses."
-            ),
-            variables=["jurisdiction", "domain", "language", "case_description"],
-            description="Template for case evaluation",
-        ),
-    }
-
-    _SYSTEM_PROMPTS: Dict[str, str] = {
-        "ar": (
-            "أنت مساعد قانوني متخصص. قدم معلومات دقيقة ومفيدة "
-            "مع الإشارة إلى المصادر القانونية ذات الصلة."
-        ),
-        "en": (
-            "You are a specialized legal assistant. Provide accurate and helpful "
-            "information with references to relevant legal sources."
-        ),
-    }
 
     async def get_template(
         self,
@@ -107,10 +145,8 @@ class StubPromptService(PromptServiceInterface):
         jurisdiction: str,
         language: str,
     ) -> PromptTemplate:
-        """Get the appropriate prompt template."""
-        template = self._TEMPLATES.get(task_type)
+        template = _TEMPLATES.get(task_type)
         if template is None:
-            # Return a generic template
             return PromptTemplate(
                 id="generic-v1",
                 name="Generic Template",
@@ -125,27 +161,25 @@ class StubPromptService(PromptServiceInterface):
         variables: Dict[str, Any],
         context_documents: Optional[List[str]] = None,
     ) -> AssembledPrompt:
-        """Assemble a complete prompt from template and variables."""
-        # Add context documents to variables if provided
+        # Inject context documents
         if context_documents:
             variables["context"] = "\n\n".join(context_documents)
 
-        # Simple variable substitution
+        # Always inject the system prompt
+        variables.setdefault("system_prompt", _MOEIN_SYSTEM_PROMPT)
+
+        # Variable substitution
         prompt = template.template
         for var, value in variables.items():
             placeholder = "{" + var + "}"
             if placeholder in prompt:
                 prompt = prompt.replace(placeholder, str(value))
 
-        language = variables.get("language", "en")
-        system_prompt = self._SYSTEM_PROMPTS.get(language, self._SYSTEM_PROMPTS["en"])
-
         return AssembledPrompt(
             prompt=prompt,
-            system_prompt=system_prompt,
+            system_prompt=_MOEIN_SYSTEM_PROMPT,
             template_id=template.id,
             template_version=template.version,
-            metadata={"stub": True},
         )
 
     async def get_system_prompt(
@@ -154,13 +188,11 @@ class StubPromptService(PromptServiceInterface):
         jurisdiction: str,
         language: str,
     ) -> str:
-        """Get the system prompt for a task type."""
-        return self._SYSTEM_PROMPTS.get(language, self._SYSTEM_PROMPTS["en"])
+        return _MOEIN_SYSTEM_PROMPT
 
     async def health_check(self) -> bool:
-        """Always returns True for stub."""
         return True
 
 
 # Default instance for dependency injection
-stub_prompt_service = StubPromptService()
+prompt_service = LegalPromptService()

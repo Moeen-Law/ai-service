@@ -1,43 +1,61 @@
 """
-Stub LLM Service Adapter
+Gemini LLM Service Adapter
 
-Fake implementation of LLM service for testing and development.
-Returns canned responses without calling any real LLM.
+Production implementation using Google Gemini via LangChain.
+Supports both single-shot generation and async streaming (SSE).
 """
 
-from typing import Optional
+from typing import AsyncIterator, Optional
 
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+from app.infrastructure.config.settings import get_settings
+from app.infrastructure.logging.logger import get_logger
 from app.interfaces.ai.llm_service import (
     LLMRequest,
     LLMResponse,
     LLMServiceInterface,
 )
 
+logger = get_logger(__name__)
 
-class StubLLMService(LLMServiceInterface):
+
+class GeminiLLMService(LLMServiceInterface):
     """
-    Stub implementation of LLM service.
+    LLM service backed by Google Gemini (via ``langchain-google-genai``).
 
-    Returns deterministic canned responses for testing.
-    Can be easily replaced with real implementation later.
+    Provides:
+    - ``generate`` — single-shot text generation
+    - ``generate_with_context`` — generation with additional context
+    - ``astream`` — async token-level streaming for SSE
     """
 
-    def __init__(self, model_name: str = "stub-llm-v1") -> None:
-        self._model_name = model_name
+    def __init__(self) -> None:
+        settings = get_settings()
+        self._model_name = settings.LLM_MODEL
+        self._llm = ChatGoogleGenerativeAI(
+            model=self._model_name,
+            temperature=settings.LLM_TEMPERATURE,
+            google_api_key=settings.GEMINI_API_KEY,
+        )
+
+    # ------------------------------------------------------------------
+    # Single-shot generation
+    # ------------------------------------------------------------------
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
-        """Generate a stubbed response."""
-        # Generate a simple response based on prompt length
-        prompt_length = len(request.prompt)
-        response_content = self._generate_stub_content(request.prompt)
-
-        return LLMResponse(
-            content=response_content,
-            model=self._model_name,
-            tokens_used=prompt_length + len(response_content.split()),
-            finish_reason="stop",
-            metadata={"stub": True},
-        )
+        try:
+            result = await self._llm.ainvoke(request.prompt)
+            content = result.content if hasattr(result, "content") else str(result)
+            return LLMResponse(
+                content=content,
+                model=self._model_name,
+                tokens_used=len(content.split()),
+                finish_reason="stop",
+            )
+        except Exception as exc:
+            logger.error("llm_generate_failed", error=str(exc))
+            raise
 
     async def generate_with_context(
         self,
@@ -46,40 +64,42 @@ class StubLLMService(LLMServiceInterface):
         system_prompt: Optional[str] = None,
         max_tokens: Optional[int] = None,
     ) -> LLMResponse:
-        """Generate a stubbed response with context."""
-        combined_prompt = f"Context:\n{context}\n\nQuestion:\n{prompt}"
-        response_content = self._generate_stub_content(combined_prompt)
+        combined = ""
+        if system_prompt:
+            combined += f"{system_prompt}\n\n"
+        combined += f"السياق:\n{context}\n\nالسؤال:\n{prompt}"
 
+        result = await self._llm.ainvoke(combined)
+        content = result.content if hasattr(result, "content") else str(result)
         return LLMResponse(
-            content=response_content,
+            content=content,
             model=self._model_name,
-            tokens_used=len(combined_prompt.split()) + len(response_content.split()),
+            tokens_used=len(content.split()),
             finish_reason="stop",
-            metadata={"stub": True, "has_context": True},
         )
+
+    # ------------------------------------------------------------------
+    # Streaming
+    # ------------------------------------------------------------------
+
+    async def astream(self, prompt: str) -> AsyncIterator[str]:
+        """Yield tokens one-by-one from Gemini's async stream."""
+        async for chunk in self._llm.astream(prompt):
+            token = chunk.content if hasattr(chunk, "content") else str(chunk)
+            if token:
+                yield token
+
+    # ------------------------------------------------------------------
+    # Health
+    # ------------------------------------------------------------------
 
     async def health_check(self) -> bool:
-        """Always returns True for stub."""
-        return True
-
-    def _generate_stub_content(self, prompt: str) -> str:
-        """Generate stub content based on prompt."""
-        # Check for Arabic content
-        if any("\u0600" <= char <= "\u06ff" for char in prompt):
-            return (
-                "هذه استجابة تجريبية من نموذج اللغة. "
-                "في النسخة النهائية، سيتم توليد استجابة حقيقية "
-                "بناءً على السياق والسؤال المقدم. "
-                "[نص تجريبي - LLM Stub]"
-            )
-
-        return (
-            "This is a stub response from the language model. "
-            "In the final version, a real response will be generated "
-            "based on the context and question provided. "
-            "[Stub text - LLM Stub]"
-        )
+        try:
+            result = await self._llm.ainvoke("ping")
+            return bool(result)
+        except Exception:
+            return False
 
 
 # Default instance for dependency injection
-stub_llm_service = StubLLMService()
+llm_service = GeminiLLMService()
