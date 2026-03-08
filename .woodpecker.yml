@@ -1,0 +1,58 @@
+when:
+  - event: [push, manual, cron]
+    branch: main
+
+steps:
+  version:
+    image: python:3.12-slim
+    commands:
+      - |
+        VERSION=$(python -c "import re; print(re.search(r'__version__\s*=\s*\"(.+?)\"', open('app/__init__.py').read()).group(1))")
+        printf "%s\nlatest\n" "$VERSION" > .tags
+
+  build-and-push:
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: registry.moeenlaw.com/ai-service
+      dockerfile: Dockerfile
+      context: .
+      tags_file: .tags
+      registry: registry.moeenlaw.com
+      username:
+        from_secret: REGISTRY_USERNAME
+      password:
+        from_secret: REGISTRY_PASSWORD
+
+  notify-success:
+    image: appleboy/drone-discord
+    settings:
+      webhook_id:
+        from_secret: DISCORD_WEBHOOK_ID
+      webhook_token:
+        from_secret: DISCORD_WEBHOOK_TOKEN
+      message: |
+        ✅ **Build Succeeded:** `${CI_REPO_OWNER}/${CI_REPO_NAME}` (Build #${CI_PIPELINE_NUMBER})
+        **Branch:** `${CI_COMMIT_BRANCH:-${CI_COMMIT_TAG}}`
+        **Author:** `${CI_COMMIT_AUTHOR}`
+        **Author Email**: `${CI_COMMIT_AUTHOR_EMAIL}`
+        **Commit:** `${CI_COMMIT_MESSAGE}`
+        **Link:** ${CI_PIPELINE_URL}
+    when:
+      - status: [success]
+
+  notify-failure:
+    image: appleboy/drone-discord
+    settings:
+      webhook_id:
+        from_secret: DISCORD_WEBHOOK_ID
+      webhook_token:
+        from_secret: DISCORD_WEBHOOK_TOKEN
+      message: |
+        🚨 **Build Failed:** `${CI_REPO_OWNER}/${CI_REPO_NAME}` (Build #${CI_PIPELINE_NUMBER})
+        **Branch:** `${CI_COMMIT_BRANCH:-${CI_COMMIT_TAG}}`
+        **Author:** `${CI_COMMIT_AUTHOR}`
+        **Author Email**: `${CI_COMMIT_AUTHOR_EMAIL}`
+        **Commit:** `${CI_COMMIT_MESSAGE}`
+        **Link:** ${CI_PIPELINE_URL}
+    when:
+      - status: [failure]

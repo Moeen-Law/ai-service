@@ -157,3 +157,85 @@ curl -X POST http://localhost:8000/v1/ai/tasks \
     }
   }'
 ```
+
+## 🐳 Docker
+
+The project includes a production-grade, multi-stage `Dockerfile` that produces a lean, secure image.
+
+### Building the Image
+
+```bash
+docker build -t ai-service .
+```
+
+To tag for the private registry:
+
+```bash
+docker build -t registry.moeenlaw.com/ai-service:latest .
+```
+
+You can also apply a version tag:
+
+```bash
+docker build -t registry.moeenlaw.com/ai-service:1.0.0 \
+             -t registry.moeenlaw.com/ai-service:latest .
+```
+
+### Running the Container
+
+Pass your `.env` file and expose port **8000**:
+
+```bash
+docker run -d \
+  --name ai-service \
+  --env-file .env \
+  -p 8000:8000 \
+  registry.moeenlaw.com/ai-service:latest
+```
+
+Verify the service is healthy:
+
+```bash
+docker ps                         # STATUS should show (healthy)
+curl http://localhost:8000/docs   # Should return the Swagger UI
+```
+
+### Pushing to the Registry
+
+1. **Log in** to the private registry (first time only):
+
+   ```bash
+   docker login registry.moeenlaw.com
+   ```
+
+2. **Build & tag** (if not already tagged):
+
+   ```bash
+   docker build -t registry.moeenlaw.com/ai-service:latest .
+   ```
+
+3. **Push** the image:
+
+   ```bash
+   docker push registry.moeenlaw.com/ai-service:latest
+   ```
+
+   Push a specific version tag:
+
+   ```bash
+   docker push registry.moeenlaw.com/ai-service:1.0.0
+   ```
+
+### Environment Variables
+
+All configuration is passed via environment variables. See [`.env.example`](.env.example) for the full list. Key variables for production:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ENVIRONMENT` | `development` / `staging` / `production` | `development` |
+| `HOST` | Bind address | `0.0.0.0` |
+| `PORT` | Listen port | `8000` |
+| `LOG_LEVEL` | Logging verbosity | `INFO` |
+| `GEMINI_API_KEY` | Google Gemini API key | — |
+| `QDRANT_URL` | Qdrant vector DB URL | `http://localhost:6333` |
+| `QDRANT_API_KEY` | Qdrant API key | — |

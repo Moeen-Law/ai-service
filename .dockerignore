@@ -1,0 +1,67 @@
+# =============================================================================
+# .dockerignore - keep the build context small and secret-free
+# =============================================================================
+
+# --- Version Control ---
+.git
+.gitignore
+
+# --- Virtual Environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- Environment & Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Python Cache ---
+__pycache__/
+*.py[codz]
+*.pyo
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+
+# --- Testing ---
+tests/
+pytest.ini
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# --- Documentation & Build ---
+docs/
+*.md
+LICENSE
+
+# --- IDE & Editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Docker ---
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# --- CI/CD ---
+.woodpecker*
+.github/
+.gitlab-ci.yml
+
+# --- Misc ---
+*.egg-info/
+dist/
+build/
+generate_docs_pdf.py
