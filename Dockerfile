@@ -87,15 +87,10 @@ EXPOSE 8000
 
 # Health-check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD curl --fail http://localhost:8000/health | grep "healthy" || exit 1
+    CMD curl --fail http://localhost:${PORT:-8000}/health | grep "healthy" || exit 1
 
 # Use tini as PID 1 for proper signal handling
 ENTRYPOINT ["tini", "--"]
 
 # Start Uvicorn - production settings
-CMD ["uvicorn", "app.api.main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
-     "--workers", "1", \
-     "--log-level", "info", \
-     "--no-access-log"]
+CMD ["sh", "-c", "uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level info --no-access-log"]
