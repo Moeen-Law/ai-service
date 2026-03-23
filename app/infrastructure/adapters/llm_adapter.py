@@ -51,7 +51,7 @@ class GeminiLLMService(LLMServiceInterface):
             
             # Ensure content is a string (handle list from Gemini)
             if isinstance(content, list):
-                content = " ".join(str(item) for item in content)
+                content = "".join(str(item) for item in content)
             elif not isinstance(content, str):
                 content = str(content)
             
@@ -82,7 +82,7 @@ class GeminiLLMService(LLMServiceInterface):
         
         # Ensure content is a string (handle list from Gemini)
         if isinstance(content, list):
-            content = " ".join(str(item) for item in content)
+            content = "".join(str(item) for item in content)
         elif not isinstance(content, str):
             content = str(content)
         
