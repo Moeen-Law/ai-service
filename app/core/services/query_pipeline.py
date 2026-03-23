@@ -203,8 +203,16 @@ class QueryPipeline:
 
             resp = await self._llm.generate(LLMRequest(prompt=prompt))
             raw = resp.content.strip()
-            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
-            raw = re.sub(r"\s*```$", "", raw, flags=re.MULTILINE).strip()
+            
+            # Remove markdown code blocks (with or without language specifier)
+            raw = re.sub(r"```(?:json)?\s*", "", raw)
+            
+            # Extract JSON object if wrapped in extra text
+            json_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", raw)
+            if json_match:
+                raw = json_match.group(0)
+            
+            raw = raw.strip()
 
             parsed = json.loads(raw)
 
