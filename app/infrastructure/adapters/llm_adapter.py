@@ -46,7 +46,15 @@ class GeminiLLMService(LLMServiceInterface):
     async def generate(self, request: LLMRequest) -> LLMResponse:
         try:
             result = await self._llm.ainvoke(request.prompt)
+
             content = result.content if hasattr(result, "content") else str(result)
+            
+            # Ensure content is a string (handle list from Gemini)
+            if isinstance(content, list):
+                content = " ".join(str(item) for item in content)
+            elif not isinstance(content, str):
+                content = str(content)
+            
             return LLMResponse(
                 content=content,
                 model=self._model_name,
@@ -71,6 +79,13 @@ class GeminiLLMService(LLMServiceInterface):
 
         result = await self._llm.ainvoke(combined)
         content = result.content if hasattr(result, "content") else str(result)
+        
+        # Ensure content is a string (handle list from Gemini)
+        if isinstance(content, list):
+            content = " ".join(str(item) for item in content)
+        elif not isinstance(content, str):
+            content = str(content)
+        
         return LLMResponse(
             content=content,
             model=self._model_name,
