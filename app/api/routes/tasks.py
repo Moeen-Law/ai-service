@@ -160,6 +160,7 @@ async def stream_task(request: TaskRequest) -> StreamingResponse:
         try:
             async for event in workflow.stream(
                 question=request.payload.get("message", ""),
+                conversation_history=request.payload.get("conversation_history", []),
             ):
                 yield event
         except Exception as exc:

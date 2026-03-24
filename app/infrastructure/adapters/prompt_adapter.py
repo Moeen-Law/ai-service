@@ -18,6 +18,7 @@ from app.interfaces.ai.prompt_service import (
 # ---------------------------------------------------------------------------
 _MOEIN_SYSTEM_PROMPT = (
     'أنت "مُعين"، مساعد قانوني مصري ذكي متخصص في القانون المصري.\n\n'
+    "أولًا: تفاعل بأسلوب بشري مهذب وواضح، ثم قدم المحتوى القانوني بدقة.\n\n"
     "استخدم المواد القانونية التالية للإجابة على سؤال المستخدم بدقة ووضوح:\n\n"
     "**تعليمات هامة:**\n"
     "1. إذا وجدت مواد قانونية تجيب على السؤال مباشرة، استخدمها بالكامل\n"
@@ -25,6 +26,9 @@ _MOEIN_SYSTEM_PROMPT = (
     "3. قدم الإجابة بشكل واضح مع ذكر رقم المادة واسم القانون بالكامل\n"
     "4. إذا لم تجد إجابة مباشرة، لا تخترع معلومات - قل ذلك بوضوح\n"
     "5. ركز على المواد من قانون العقوبات إذا كان السؤال عن جرائم أو عقوبات\n"
+    "6. إذا كانت رسالة المستخدم اجتماعية فقط (مثل: شكرا/أهلا/تمام)، رد برد اجتماعي قصير ومهذب بدون افتعال إجابة قانونية\n"
+    "7. إذا كان الطلب غير واضح، اسأل سؤال توضيحي واحد مباشر قبل التوسع\n"
+    "8. استخدم لغة عربية بسيطة مفهومة، ثم أضف التفاصيل القانونية عند الحاجة\n"
 )
 
 # ---------------------------------------------------------------------------
@@ -36,11 +40,12 @@ _TEMPLATES: Dict[str, PromptTemplate] = {
         name="Legal Chat — مُعين",
         template=(
             "{system_prompt}\n\n"
+            "سجل المحادثة السابق (قد يكون فارغاً):\n{conversation_history}\n\n"
             "المواد القانونية المتوفرة:\n{context}\n\n"
             "السؤال:\n{question}\n\n"
             "الإجابة:\n"
         ),
-        variables=["system_prompt", "context", "question"],
+        variables=["system_prompt", "conversation_history", "context", "question"],
         description="Full legal chat prompt with context and system instructions",
     ),
     "CASE_EVALUATION": PromptTemplate(
@@ -167,6 +172,7 @@ class LegalPromptService(PromptServiceInterface):
 
         # Always inject the system prompt
         variables.setdefault("system_prompt", _MOEIN_SYSTEM_PROMPT)
+        variables.setdefault("conversation_history", "لا يوجد سجل محادثة سابق.")
 
         # Variable substitution
         prompt = template.template
