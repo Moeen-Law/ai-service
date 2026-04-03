@@ -2,7 +2,7 @@
 Legal Chat Workflow
 
 Full-pipeline workflow for conversational legal queries.
-Uses hybrid RAG retrieval, LLM query-rewriting, and SSE streaming.
+Uses intent classification, hybrid RAG retrieval, LLM query-rewriting, and SSE streaming.
 """
 
 import json
@@ -12,8 +12,9 @@ from typing import Any, AsyncIterator, Dict, Optional
 from uuid import UUID
 
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
-from app.core.domain.enums import TaskStatus, TaskType
+from app.core.domain.enums import Intent, TaskStatus, TaskType
 from app.core.services.query_pipeline import QueryPipeline
+from app.core.validators.intent_classifier import IntentClassifier
 from app.core.workflows.base import BaseWorkflow
 from app.infrastructure.logging.logger import get_logger
 from app.interfaces.ai.llm_service import LLMServiceInterface
@@ -28,10 +29,14 @@ class LegalChatWorkflow(BaseWorkflow):
     Workflow for LEGAL_CHAT task type.
 
     Pipeline:
-    1. QueryPipeline.run() — rewrite → hybrid retrieve → inject → rerank → filter
-    2. Assemble prompt with مُعين system instructions
-    3. LLM generate (non-streaming path) OR stream (streaming path)
-    4. Filter cited sources
+    1. Intent Classification — determine if CHITCHAT, LEGAL_QUERY, VAGUE, or OUT_OF_SCOPE
+    2. Route based on intent:
+       - CHITCHAT/OUT_OF_SCOPE/VAGUE → Quick response
+       - LEGAL_QUERY → Full pipeline:
+          a. QueryPipeline.run() — rewrite → hybrid retrieve → inject → rerank → filter
+          b. Assemble prompt with system instructions
+          c. LLM generate (non-streaming) OR stream (streaming path)
+          d. Filter cited sources
     """
 
     def __init__(
@@ -44,12 +49,14 @@ class LegalChatWorkflow(BaseWorkflow):
         self._rag = rag_service
         self._llm = llm_service
         self._prompt = prompt_service
+        self._intent_classifier = IntentClassifier(llm_service=llm_service)
         self._pipeline = QueryPipeline(
             rag_service=rag_service,
             llm_service=llm_service,
             max_frontend_sources=max_frontend_sources,
         )
         self._max_sources = max_frontend_sources
+        # Keep legacy patterns as fallback
         self._social_only_patterns = [
             r"^\s*(شكرا|شكرًا|متشكر|تسلم|تمام|اوك|أوك|موافق|ماشي|اهلا|أهلا|سلام|باي|مع السلامة|thanks|ok)\s*[!.؟?]*\s*$",
         ]
@@ -87,13 +94,22 @@ class LegalChatWorkflow(BaseWorkflow):
         retrieval_k = payload.get("retrieval_k", 4)
         conversation_history = payload.get("conversation_history", [])
 
-        if self._is_social_only_message(message):
+        # Step 1: Classify intent
+        classification = await self._intent_classifier.classify(message)
+        logger.debug(
+            f"Intent: {classification.intent.value} "
+            f"(confidence: {classification.confidence})"
+        )
+
+        # Step 2: Route based on intent
+        if classification.intent == Intent.CHITCHAT:
             return Result.success(
                 task_id=UUID(task_id),
                 task_type=TaskType.LEGAL_CHAT,
                 data={
-                    "message": self._build_social_response(message),
+                    "message": self._build_chitchat_response(message),
                     "sources": [],
+                    "intent": Intent.CHITCHAT.value,
                 },
                 metadata=ResultMetadata(
                     execution_time_ms=int((time.time() - start_time) * 1000),
@@ -101,10 +117,49 @@ class LegalChatWorkflow(BaseWorkflow):
                 ),
             )
 
-        # 1. Retrieval pipeline
+        if classification.intent == Intent.OUT_OF_SCOPE:
+            return Result.success(
+                task_id=UUID(task_id),
+                task_type=TaskType.LEGAL_CHAT,
+                data={
+                    "message": self._build_out_of_scope_response(),
+                    "sources": [],
+                    "intent": Intent.OUT_OF_SCOPE.value,
+                },
+                metadata=ResultMetadata(
+                    execution_time_ms=int((time.time() - start_time) * 1000),
+                    model_used="rule-based",
+                ),
+            )
+
+        if classification.intent == Intent.VAGUE:
+            clarification = (
+                classification.suggested_clarification
+                or "تقصد بخصوص قانون العمل، أم قانون مدني، أم غيره؟"
+            )
+            return Result.success(
+                task_id=UUID(task_id),
+                task_type=TaskType.LEGAL_CHAT,
+                data={
+                    "message": f"السؤال غير واضح تماماً. {clarification}",
+                    "sources": [],
+                    "intent": Intent.VAGUE.value,
+                },
+                metadata=ResultMetadata(
+                    execution_time_ms=int((time.time() - start_time) * 1000),
+                    model_used="rule-based",
+                ),
+            )
+
+        # Step 3: Full legal query processing
+        # If intent is legal_query, proceed with full pipeline
+        # 1. Retrieval pipeline (pass precomputed rewrite data to avoid duplicate LLM call)
         pipeline_result = await self._pipeline.run(
             question=message,
             retrieval_k=retrieval_k,
+            precomputed_domain=classification.domain,
+            precomputed_keywords=classification.keywords,
+            precomputed_articles=classification.likely_articles,
         )
 
         if not pipeline_result.context:
@@ -117,6 +172,7 @@ class LegalChatWorkflow(BaseWorkflow):
                         "يرجى إعادة صياغة السؤال أو التأكد من صحة المصطلحات المستخدمة."
                     ),
                     "sources": [],
+                    "intent": Intent.LEGAL_QUERY.value,
                 },
                 metadata=ResultMetadata(
                     execution_time_ms=int((time.time() - start_time) * 1000),
@@ -159,6 +215,7 @@ class LegalChatWorkflow(BaseWorkflow):
             data={
                 "message": answer,
                 "sources": frontend_sources,
+                "intent": Intent.LEGAL_QUERY.value,
             },
             metadata=ResultMetadata(
                 execution_time_ms=execution_time_ms,
@@ -185,17 +242,39 @@ class LegalChatWorkflow(BaseWorkflow):
         """
         t_start = time.perf_counter()
 
-        if self._is_social_only_message(question):
-            quick_reply = self._build_social_response(question)
+        # Step 1: Classify intent
+        classification = await self._intent_classifier.classify(question)
+        logger.debug(
+            f"Intent: {classification.intent.value} "
+            f"(confidence: {classification.confidence})"
+        )
+
+        # Step 2: Route based on intent
+        if classification.intent in (Intent.CHITCHAT, Intent.OUT_OF_SCOPE, Intent.VAGUE):
+            if classification.intent == Intent.CHITCHAT:
+                quick_reply = self._build_chitchat_response(question)
+            elif classification.intent == Intent.OUT_OF_SCOPE:
+                quick_reply = self._build_out_of_scope_response()
+            else:  # VAGUE
+                clarification = (
+                    classification.suggested_clarification
+                    or "تقصد بخصوص قانون العمل، أم قانون مدني، أم غيره؟"
+                )
+                quick_reply = f"السؤال غير واضح تماماً. {clarification}"
+
             yield f"data: {json.dumps({'type': 'token', 'content': quick_reply}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'sources', 'sources': []}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'intent': classification.intent.value}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
             return
 
-        # Retrieval
+        # Step 3: Full legal query processing
+        # Retrieval (pass precomputed rewrite data to avoid duplicate LLM call)
         pipeline_result = await self._pipeline.run(
             question=question,
             retrieval_k=retrieval_k,
+            precomputed_domain=classification.domain,
+            precomputed_keywords=classification.keywords,
+            precomputed_articles=classification.likely_articles,
         )
         t_retrieval = time.perf_counter()
 
@@ -205,7 +284,7 @@ class LegalChatWorkflow(BaseWorkflow):
                 "يرجى إعادة صياغة السؤال أو التأكد من صحة المصطلحات المستخدمة."
             )
             yield f"data: {json.dumps({'type': 'token', 'content': no_result_msg}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'sources', 'sources': []}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'intent': Intent.LEGAL_QUERY.value}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
             return
 
@@ -250,10 +329,11 @@ class LegalChatWorkflow(BaseWorkflow):
             "total_ms": round((t_done - t_start) * 1000, 1),
         }
 
-        yield f"data: {json.dumps({'type': 'sources', 'sources': frontend_sources, 'timing': timing}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'sources', 'sources': frontend_sources, 'timing': timing, 'intent': Intent.LEGAL_QUERY.value}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     def _is_social_only_message(self, message: str) -> bool:
+        """Legacy fallback pattern matching."""
         text = (message or "").strip().lower()
         if not text:
             return False
@@ -264,7 +344,8 @@ class LegalChatWorkflow(BaseWorkflow):
 
         return any(re.match(pattern, text) for pattern in self._social_only_patterns)
 
-    def _build_social_response(self, message: str) -> str:
+    def _build_chitchat_response(self, message: str) -> str:
+        """Generate a friendly response for chitchat messages."""
         text = (message or "").strip().lower()
         if re.search(r"شكرا|شكرًا|متشكر|thanks|تسلم", text):
             return "العفو، تحت أمرك في أي وقت. لو حابب نكمل في أي نقطة قانونية أنا معاك."
@@ -273,6 +354,13 @@ class LegalChatWorkflow(BaseWorkflow):
         if re.search(r"باي|مع السلامة|سلام", text):
             return "مع السلامة، وفي أي وقت تحتاج استشارة قانونية أنا موجود."
         return "تمام، أنا معاك. ابعت سؤالك القانوني أو التفاصيل اللي تحب نكمل عليها."
+
+    def _build_out_of_scope_response(self) -> str:
+        """Generate a response for out-of-scope messages."""
+        return (
+            "عذراً، أنا متخصص في الاستشارات القانونية والقوانين المصرية. "
+            "لو عندك سؤال قانوني أو استفسار عن حقوقك، أنا هنا لمساعدتك."
+        )
 
     @staticmethod
     def _format_conversation_history(history: Any, limit: int = 8) -> str:

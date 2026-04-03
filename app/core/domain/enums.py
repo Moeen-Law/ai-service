@@ -62,6 +62,23 @@ class Language(str, Enum):
     ENGLISH = "en"
 
 
+class Intent(str, Enum):
+    """
+    User message intent classification.
+
+    Determines the semantic type of the user's message before processing:
+    - CHITCHAT: Greetings, thanks, small talk (no legal content)
+    - LEGAL_QUERY: Specific legal question requiring domain knowledge
+    - VAGUE: Unclear or ambiguous legal query (needs clarification)
+    - OUT_OF_SCOPE: Unrelated to legal matters
+    """
+
+    CHITCHAT = "chitchat"
+    LEGAL_QUERY = "legal_query"
+    VAGUE = "vague"
+    OUT_OF_SCOPE = "out_of_scope"
+
+
 class LegalDomain(str, Enum):
     """
     Legal domain categories.

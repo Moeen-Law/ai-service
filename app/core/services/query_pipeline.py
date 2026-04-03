@@ -82,14 +82,36 @@ class QueryPipeline:
         self,
         question: str,
         retrieval_k: int = 4,
+        precomputed_domain: Optional[str] = None,
+        precomputed_keywords: Optional[List[str]] = None,
+        precomputed_articles: Optional[List[str]] = None,
     ) -> PipelineResult:
-        """Execute the pipeline end-to-end and return context + sources."""
+        """
+        Execute the pipeline end-to-end and return context + sources.
+        
+        Can optionally skip LLM query rewriting if results are already computed
+        (e.g., from IntentClassifier for efficiency).
+        """
 
-        # 0. LLM query rewriting
-        rewrite = await self._rewrite_legal_query(question)
-        llm_domain: Optional[str] = rewrite.get("domain")
-        llm_keywords: List[str] = rewrite.get("keywords", [])
-        llm_articles: List[str] = rewrite.get("likely_articles", [])
+        # 0. LLM query rewriting — skip if precomputed
+        if precomputed_domain is not None or precomputed_keywords:
+            # Use precomputed rewrite data (from IntentClassifier)
+            llm_domain: Optional[str] = precomputed_domain
+            llm_keywords: List[str] = precomputed_keywords or []
+            llm_articles: List[str] = precomputed_articles or []
+            logger.info(
+                "pipeline_using_precomputed_rewrite",
+                domain=llm_domain,
+                keywords_count=len(llm_keywords),
+                articles=llm_articles,
+            )
+        else:
+            # Full LLM query rewriting
+            rewrite = await self._rewrite_legal_query(question)
+            llm_domain: Optional[str] = rewrite.get("domain")
+            llm_keywords: List[str] = rewrite.get("keywords", [])
+            llm_articles: List[str] = rewrite.get("likely_articles", [])
+
         expanded_query = " ".join(llm_keywords) if llm_keywords else question
 
         # 1. Domain detection
