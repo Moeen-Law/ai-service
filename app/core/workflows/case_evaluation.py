@@ -4,13 +4,13 @@ Case Evaluation Workflow
 Evaluates legal cases using RAG-retrieved legal articles and LLM analysis.
 """
 
-import json
 import time
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import TaskType
+from app.core.services.llm_json import ensure_string_list, extract_first_json_object
 from app.core.services.query_pipeline import QueryPipeline
 from app.core.workflows.base import BaseWorkflow
 from app.infrastructure.logging.logger import get_logger
@@ -87,12 +87,22 @@ class CaseEvaluationWorkflow(BaseWorkflow):
             variables=variables,
         )
 
-        # 3. LLM generation
-        resp = await self._llm.generate(LLMRequest(prompt=assembled.prompt))
+        # 3. LLM generation with structured output instruction
+        structured_prompt = (
+            f"{assembled.prompt}\n\n"
+            "أعد النتيجة كـ JSON صالح فقط بدون أي نص إضافي وفق الشكل التالي:\n"
+            '{"evaluation":"...","strengths":["..."],"weaknesses":["..."],"recommendation":"..."}'
+        )
+        resp = await self._llm.generate(LLMRequest(prompt=structured_prompt))
         answer = resp.content
 
         # 4. Parse into structured output
-        response_data = self._parse_evaluation(answer, pipeline_result.sources)
+        include_sources = options.include_sources if options is not None else True
+        response_data = self._parse_evaluation(
+            answer,
+            pipeline_result.sources,
+            include_sources=include_sources,
+        )
 
         execution_time_ms = int((time.time() - start_time) * 1000)
 
@@ -108,8 +118,29 @@ class CaseEvaluationWorkflow(BaseWorkflow):
         )
 
     @staticmethod
-    def _parse_evaluation(answer: str, sources: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _parse_evaluation(
+        answer: str,
+        sources: List[Dict[str, Any]],
+        include_sources: bool = True,
+    ) -> Dict[str, Any]:
         """Best-effort parse of the LLM answer into structured fields."""
+        parsed = extract_first_json_object(answer)
+        frontend_sources = sources[:7] if include_sources else []
+
+        if parsed:
+            evaluation = str(parsed.get("evaluation", "")).strip() or answer
+            strengths = ensure_string_list(parsed.get("strengths"))
+            weaknesses = ensure_string_list(parsed.get("weaknesses"))
+            recommendation = str(parsed.get("recommendation", "")).strip()
+
+            return {
+                "evaluation": evaluation,
+                "strengths": strengths or ["راجع التقييم أعلاه"],
+                "weaknesses": weaknesses or ["راجع التقييم أعلاه"],
+                "recommendation": recommendation or evaluation[-300:],
+                "sources": frontend_sources,
+            }
+
         # Try to extract sections by Arabic headers
         strengths: List[str] = []
         weaknesses: List[str] = []
@@ -147,5 +178,5 @@ class CaseEvaluationWorkflow(BaseWorkflow):
             "strengths": strengths or ["راجع التقييم أعلاه"],
             "weaknesses": weaknesses or ["راجع التقييم أعلاه"],
             "recommendation": recommendation.strip() or answer[-300:],
-            "sources": sources[:7],
+            "sources": frontend_sources,
         }

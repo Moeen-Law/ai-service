@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     LLM_MODEL: str = "gemini-2.0-flash"
     LLM_TEMPERATURE: float = 0.0
+    LLM_REQUEST_TIMEOUT_SECONDS: int = 30
+    LLM_MAX_RETRIES: int = 2
+    LLM_RETRY_BASE_DELAY_SECONDS: float = 0.4
 
     # --- Qdrant Vector Database ---
     QDRANT_URL: str = "http://localhost:6333"

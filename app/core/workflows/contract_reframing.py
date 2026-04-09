@@ -10,6 +10,7 @@ from uuid import UUID
 
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import TaskType
+from app.core.services.llm_json import extract_first_json_object
 from app.core.services.query_pipeline import QueryPipeline
 from app.core.workflows.base import BaseWorkflow
 from app.infrastructure.logging.logger import get_logger
@@ -79,15 +80,35 @@ class ContractReframingWorkflow(BaseWorkflow):
             },
         )
 
-        # 3. Generate
-        resp = await self._llm.generate(LLMRequest(prompt=assembled.prompt))
+        # 3. Generate structured output (fallback to current extraction)
+        structured_prompt = (
+            f"{assembled.prompt}\n\n"
+            "أعد النتيجة كـ JSON صالح فقط بدون أي نص إضافي وفق الشكل التالي:\n"
+            '{"reframed_clause":"...","changes_summary":"..."}'
+        )
+        resp = await self._llm.generate(LLMRequest(prompt=structured_prompt))
         answer = resp.content
+
+        parsed = extract_first_json_object(answer)
+        include_sources = options.include_sources if options is not None else True
+        frontend_sources = pipeline_result.sources[:7] if include_sources else []
+
+        if parsed:
+            reframed_clause = str(
+                parsed.get("reframed_clause", "")
+            ).strip() or self._extract_reframed(answer)
+            changes_summary = str(
+                parsed.get("changes_summary", "")
+            ).strip() or self._extract_changes_summary(answer)
+        else:
+            reframed_clause = self._extract_reframed(answer)
+            changes_summary = self._extract_changes_summary(answer)
 
         # 4. Build response
         response_data = {
-            "reframed_clause": self._extract_reframed(answer),
-            "changes_summary": self._extract_changes_summary(answer),
-            "sources": pipeline_result.sources[:7],
+            "reframed_clause": reframed_clause,
+            "changes_summary": changes_summary,
+            "sources": frontend_sources,
         }
 
         execution_time_ms = int((time.time() - start_time) * 1000)

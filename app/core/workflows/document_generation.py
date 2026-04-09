@@ -10,6 +10,7 @@ from uuid import UUID
 
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import TaskType
+from app.core.services.llm_json import extract_first_json_object
 from app.core.services.query_pipeline import QueryPipeline
 from app.core.workflows.base import BaseWorkflow
 from app.infrastructure.logging.logger import get_logger
@@ -81,15 +82,31 @@ class DocumentGenerationWorkflow(BaseWorkflow):
             },
         )
 
-        # 3. Generate
-        resp = await self._llm.generate(LLMRequest(prompt=assembled.prompt))
-        content = resp.content
+        # 3. Generate structured output (fallback to plain text when parsing fails)
+        structured_prompt = (
+            f"{assembled.prompt}\n\n"
+            "أعد النتيجة كـ JSON صالح فقط بدون أي نص إضافي وفق هذا الشكل:\n"
+            '{"document_content":"...","format":"markdown"}'
+        )
+        resp = await self._llm.generate(LLMRequest(prompt=structured_prompt))
+        parsed = extract_first_json_object(resp.content)
+
+        content = str(resp.content).strip()
+        document_format = "markdown"
+        if parsed:
+            content = str(parsed.get("document_content", "")).strip() or content
+            document_format = (
+                str(parsed.get("format", "markdown")).strip() or "markdown"
+            )
+
+        include_sources = options.include_sources if options is not None else True
+        frontend_sources = pipeline_result.sources[:7] if include_sources else []
 
         # 4. Build response
         response_data = {
             "document_content": content,
-            "format": "markdown",
-            "sources": pipeline_result.sources[:7],
+            "format": document_format,
+            "sources": frontend_sources,
         }
 
         execution_time_ms = int((time.time() - start_time) * 1000)
