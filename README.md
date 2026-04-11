@@ -153,10 +153,15 @@ curl -X POST http://localhost:8000/v1/ai/tasks \
       "language": "ar"
     },
     "payload": {
-      "message": "ما هي شروط العقد الصحيح؟"
+         "message": "ما هي شروط العقد الصحيح؟",
+         "files_ids": ["file_123", "file_456"]
     }
   }'
 ```
+
+`files_ids` is optional and currently supported for non-streaming `LEGAL_CHAT` requests only.
+When provided, files are fetched from the Files service, extracted (PDF/DOCX/text),
+and analyzed together with the user prompt.
 
 ## 🐳 Docker
 
@@ -239,3 +244,11 @@ All configuration is passed via environment variables. See [`.env.example`](.env
 | `GEMINI_API_KEY` | Google Gemini API key | — |
 | `QDRANT_URL` | Qdrant vector DB URL | `http://localhost:6333` |
 | `QDRANT_API_KEY` | Qdrant API key | — |
+| `FILES_SERVICE_BASE_URL` | Base URL for external files service | — |
+| `FILES_SERVICE_DOWNLOAD_PATH_TEMPLATE` | Download endpoint path template (supports `{file_id}`) | `/files/{file_id}` |
+| `FILES_SERVICE_AUTH_TOKEN` | Bearer token for files service calls | — |
+| `FILES_SERVICE_TIMEOUT_SECONDS` | HTTP timeout for file fetch operations | `20` |
+| `FILES_MAX_COUNT` | Max uploaded files per request | `10` |
+| `FILES_MAX_SIZE_BYTES` | Max binary size per uploaded file | `8388608` |
+| `FILES_MAX_EXTRACTED_CHARS_PER_FILE` | Max extracted characters per file | `15000` |
+| `FILES_MAX_EXTRACTED_TOTAL_CHARS` | Max combined extracted characters in prompt | `50000` |

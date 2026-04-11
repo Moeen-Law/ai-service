@@ -301,3 +301,24 @@ class TestTasksAPI:
 
         assert response.status_code == 200
         assert response.json()["status"] == "success"
+
+    def test_stream_with_files_ids_not_supported(self, client: TestClient) -> None:
+        """Test stream endpoint rejects files_ids for now."""
+        response = client.post(
+            "/v1/ai/tasks/stream",
+            json={
+                "task_type": "LEGAL_CHAT",
+                "context": {
+                    "jurisdiction": "EGYPT",
+                    "language": "ar",
+                },
+                "payload": {
+                    "message": "حلل الملف",
+                    "files_ids": ["file_123"],
+                },
+            },
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["code"] == "STREAMING_WITH_FILES_NOT_SUPPORTED"

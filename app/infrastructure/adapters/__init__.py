@@ -2,6 +2,10 @@
 Concrete Adapter Implementations
 """
 
+from app.infrastructure.adapters.file_service_adapter import (
+    HTTPFileService,
+    file_service,
+)
 from app.infrastructure.adapters.llm_adapter import GeminiLLMService, llm_service
 from app.infrastructure.adapters.prompt_adapter import (
     LegalPromptService,
@@ -10,6 +14,9 @@ from app.infrastructure.adapters.prompt_adapter import (
 from app.infrastructure.adapters.rag_adapter import QdrantRAGService, rag_service
 
 __all__ = [
+    # Files Adapter
+    "HTTPFileService",
+    "file_service",
     # LLM Adapter
     "GeminiLLMService",
     "llm_service",

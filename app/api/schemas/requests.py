@@ -7,7 +7,7 @@ Handles shape validation only - no business rules.
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.domain.enums import TaskType
 
@@ -47,6 +47,29 @@ class LegalChatPayload(BaseModel):
         description="Previous conversation messages",
         max_length=50,
     )
+    files_ids: Optional[List[str]] = Field(
+        default=None,
+        description="Optional uploaded file IDs to analyze with the prompt",
+        max_length=10,
+    )
+
+    @field_validator("files_ids")
+    @classmethod
+    def validate_files_ids(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        """Validate uploaded file IDs shape and size constraints."""
+        if value is None:
+            return value
+
+        if not isinstance(value, list):
+            raise ValueError("files_ids must be a list of file IDs")
+
+        for file_id in value:
+            if not isinstance(file_id, str) or not file_id.strip():
+                raise ValueError("files_ids must contain non-empty string IDs")
+            if len(file_id.strip()) > 128:
+                raise ValueError("file ID length must be <= 128 characters")
+
+        return value
 
     model_config = {
         "extra": "forbid",
@@ -192,6 +215,7 @@ class TaskRequest(BaseModel):
                     "payload": {
                         "message": "ما هي شروط العقد الصحيح؟",
                         "conversation_history": [],
+                        "files_ids": ["file_123", "file_456"],
                     },
                 }
             ]

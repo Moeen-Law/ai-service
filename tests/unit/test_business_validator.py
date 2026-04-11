@@ -91,6 +91,57 @@ class TestBusinessValidator:
 
         assert "message" in str(exc_info.value).lower()
 
+    def test_legal_chat_with_files_ids_valid(
+        self, validator: BusinessValidator, base_context: Context
+    ) -> None:
+        """Test LEGAL_CHAT with valid files_ids passes validation."""
+        task = self._create_task(
+            TaskType.LEGAL_CHAT,
+            base_context,
+            {
+                "message": "حلل الملفات المرفوعة",
+                "files_ids": ["file_1", "file_2"],
+            },
+        )
+
+        validator.validate(task)
+
+    def test_legal_chat_files_ids_must_be_list(
+        self, validator: BusinessValidator, base_context: Context
+    ) -> None:
+        """Test LEGAL_CHAT rejects files_ids when not a list."""
+        task = self._create_task(
+            TaskType.LEGAL_CHAT,
+            base_context,
+            {
+                "message": "حلل الملف",
+                "files_ids": "file_1",
+            },
+        )
+
+        with pytest.raises(PayloadValidationError) as exc_info:
+            validator.validate(task)
+
+        assert "files_ids" in str(exc_info.value).lower()
+
+    def test_legal_chat_files_ids_rejects_blank_values(
+        self, validator: BusinessValidator, base_context: Context
+    ) -> None:
+        """Test LEGAL_CHAT rejects blank file IDs."""
+        task = self._create_task(
+            TaskType.LEGAL_CHAT,
+            base_context,
+            {
+                "message": "حلل الملف",
+                "files_ids": ["file_1", "   "],
+            },
+        )
+
+        with pytest.raises(PayloadValidationError) as exc_info:
+            validator.validate(task)
+
+        assert "non-empty" in str(exc_info.value).lower()
+
     # --- DOCUMENT_GENERATION Tests ---
 
     def test_document_generation_valid_payload(

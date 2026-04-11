@@ -8,9 +8,10 @@ Uses intent classification, hybrid RAG retrieval, LLM query-rewriting, and SSE s
 import json
 import re
 import time
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 from uuid import UUID
 
+from app.core.services.file_text_extractor import FileTextExtractor
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import Intent, TaskStatus, TaskType
 from app.core.services.query_pipeline import QueryPipeline
@@ -20,6 +21,12 @@ from app.infrastructure.logging.logger import get_logger
 from app.interfaces.ai.llm_service import LLMServiceInterface
 from app.interfaces.ai.prompt_service import PromptServiceInterface
 from app.interfaces.ai.rag_service import RAGServiceInterface
+from app.interfaces.external.file_service import ExternalFileServiceInterface
+from app.shared.errors.exceptions import (
+    FileExtractionError,
+    FilesServiceError,
+    PayloadValidationError,
+)
 
 logger = get_logger(__name__)
 
@@ -44,6 +51,8 @@ class LegalChatWorkflow(BaseWorkflow):
         rag_service: RAGServiceInterface,
         llm_service: LLMServiceInterface,
         prompt_service: PromptServiceInterface,
+        file_service: Optional[ExternalFileServiceInterface] = None,
+        file_text_extractor: Optional[FileTextExtractor] = None,
         max_frontend_sources: int = 7,
     ) -> None:
         self._rag = rag_service
@@ -55,6 +64,8 @@ class LegalChatWorkflow(BaseWorkflow):
             llm_service=llm_service,
             max_frontend_sources=max_frontend_sources,
         )
+        self._file_service = file_service
+        self._file_text_extractor = file_text_extractor or FileTextExtractor()
         self._max_sources = max_frontend_sources
         # Keep legacy patterns as fallback
         self._social_only_patterns = [
@@ -93,6 +104,7 @@ class LegalChatWorkflow(BaseWorkflow):
         message = payload.get("message", "")
         retrieval_k = payload.get("retrieval_k", 4)
         conversation_history = payload.get("conversation_history", [])
+        files_ids = self._normalize_file_ids(payload.get("files_ids"))
 
         # Step 1: Classify intent
         classification = await self._intent_classifier.classify(message)
@@ -102,7 +114,7 @@ class LegalChatWorkflow(BaseWorkflow):
         )
 
         # Step 2: Route based on intent
-        if classification.intent == Intent.CHITCHAT:
+        if classification.intent == Intent.CHITCHAT and not files_ids:
             return Result.success(
                 task_id=UUID(task_id),
                 task_type=TaskType.LEGAL_CHAT,
@@ -117,7 +129,7 @@ class LegalChatWorkflow(BaseWorkflow):
                 ),
             )
 
-        if classification.intent == Intent.OUT_OF_SCOPE:
+        if classification.intent == Intent.OUT_OF_SCOPE and not files_ids:
             return Result.success(
                 task_id=UUID(task_id),
                 task_type=TaskType.LEGAL_CHAT,
@@ -132,7 +144,7 @@ class LegalChatWorkflow(BaseWorkflow):
                 ),
             )
 
-        if classification.intent == Intent.VAGUE:
+        if classification.intent == Intent.VAGUE and not files_ids:
             clarification = (
                 classification.suggested_clarification
                 or "تقصد بخصوص قانون العمل، أم قانون مدني، أم غيره؟"
@@ -152,6 +164,8 @@ class LegalChatWorkflow(BaseWorkflow):
             )
 
         # Step 3: Full legal query processing
+        uploaded_files_context = await self._build_uploaded_files_context(files_ids)
+
         # If intent is legal_query, proceed with full pipeline
         # 1. Retrieval pipeline (pass precomputed rewrite data to avoid duplicate LLM call)
         pipeline_result = await self._pipeline.run(
@@ -162,7 +176,12 @@ class LegalChatWorkflow(BaseWorkflow):
             precomputed_articles=classification.likely_articles,
         )
 
-        if not pipeline_result.context:
+        combined_context = self._merge_contexts(
+            legal_context=pipeline_result.context,
+            uploaded_files_context=uploaded_files_context,
+        )
+
+        if not combined_context:
             return Result.success(
                 task_id=UUID(task_id),
                 task_type=TaskType.LEGAL_CHAT,
@@ -190,7 +209,7 @@ class LegalChatWorkflow(BaseWorkflow):
             template=template,
             variables={
                 "question": message,
-                "context": pipeline_result.context,
+                "context": combined_context,
                 "conversation_history": self._format_conversation_history(
                     conversation_history
                 ),
@@ -224,6 +243,77 @@ class LegalChatWorkflow(BaseWorkflow):
             ),
         )
 
+    async def _build_uploaded_files_context(self, files_ids: List[str]) -> str:
+        """Fetch uploaded files by IDs and convert them into prompt-ready text."""
+        if not files_ids:
+            return ""
+
+        if self._file_service is None:
+            raise FilesServiceError(
+                message="Files service integration is not configured",
+                details={"field": "file_service"},
+            )
+
+        try:
+            files = await self._file_service.fetch_files(files_ids)
+            extracted_files = self._file_text_extractor.extract_many(files)
+        except FileExtractionError as exc:
+            raise PayloadValidationError(
+                message="Unable to process one or more uploaded files",
+                task_type="LEGAL_CHAT",
+                details=exc.details,
+            ) from exc
+
+        chunks: List[str] = []
+        for extracted in extracted_files:
+            truncation_note = " [TRUNCATED]" if extracted.truncated else ""
+            chunks.append(
+                (
+                    f"File ID: {extracted.file_id}\n"
+                    f"Filename: {extracted.filename}\n"
+                    f"Content Type: {extracted.content_type or 'unknown'}{truncation_note}\n"
+                    f"Content:\n{extracted.text}"
+                )
+            )
+
+        return "\n\n---\n\n".join(chunks)
+
+    @staticmethod
+    def _merge_contexts(legal_context: str, uploaded_files_context: str) -> str:
+        """Combine legal-RAG context with uploaded-file context for prompt assembly."""
+        legal_context = (legal_context or "").strip()
+        uploaded_files_context = (uploaded_files_context or "").strip()
+
+        if legal_context and uploaded_files_context:
+            return (
+                f"المواد القانونية ذات الصلة:\n{legal_context}\n\n"
+                "محتوى الملفات المرفوعة من المستخدم:\n"
+                f"{uploaded_files_context}"
+            )
+
+        if uploaded_files_context:
+            return f"محتوى الملفات المرفوعة من المستخدم:\n{uploaded_files_context}"
+
+        return legal_context
+
+    @staticmethod
+    def _normalize_file_ids(raw_value: Any) -> List[str]:
+        """Normalize and de-duplicate file IDs while preserving input order."""
+        if not isinstance(raw_value, list):
+            return []
+
+        normalized: List[str] = []
+        seen = set()
+        for item in raw_value:
+            if not isinstance(item, str):
+                continue
+            value = item.strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
+
     # ------------------------------------------------------------------
     # SSE streaming path (called from the streaming route, not execute)
     # ------------------------------------------------------------------
@@ -250,7 +340,11 @@ class LegalChatWorkflow(BaseWorkflow):
         )
 
         # Step 2: Route based on intent
-        if classification.intent in (Intent.CHITCHAT, Intent.OUT_OF_SCOPE, Intent.VAGUE):
+        if classification.intent in (
+            Intent.CHITCHAT,
+            Intent.OUT_OF_SCOPE,
+            Intent.VAGUE,
+        ):
             if classification.intent == Intent.CHITCHAT:
                 quick_reply = self._build_chitchat_response(question)
             elif classification.intent == Intent.OUT_OF_SCOPE:
@@ -338,7 +432,9 @@ class LegalChatWorkflow(BaseWorkflow):
         if not text:
             return False
 
-        has_legal_cue = any(re.search(pattern, text) for pattern in self._legal_cue_patterns)
+        has_legal_cue = any(
+            re.search(pattern, text) for pattern in self._legal_cue_patterns
+        )
         if has_legal_cue:
             return False
 
@@ -348,7 +444,9 @@ class LegalChatWorkflow(BaseWorkflow):
         """Generate a friendly response for chitchat messages."""
         text = (message or "").strip().lower()
         if re.search(r"شكرا|شكرًا|متشكر|thanks|تسلم", text):
-            return "العفو، تحت أمرك في أي وقت. لو حابب نكمل في أي نقطة قانونية أنا معاك."
+            return (
+                "العفو، تحت أمرك في أي وقت. لو حابب نكمل في أي نقطة قانونية أنا معاك."
+            )
         if re.search(r"اهلا|أهلا", text):
             return "أهلا بيك، منور. احكي لي سؤالك القانوني وأنا أساعدك خطوة بخطوة."
         if re.search(r"باي|مع السلامة|سلام", text):

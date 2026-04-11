@@ -230,3 +230,25 @@ class PromptServiceError(ExternalServiceError):
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(message, "prompt_service", "PROMPT_SERVICE_ERROR", details)
+
+
+class FilesServiceError(ExternalServiceError):
+    """Exception raised when Files service operations fail."""
+
+    def __init__(
+        self,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message, "files_service", "FILES_SERVICE_ERROR", details)
+
+
+class FileExtractionError(AIServiceError):
+    """Exception raised when uploaded file content extraction fails."""
+
+    def __init__(
+        self,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message, "FILE_EXTRACTION_ERROR", details)

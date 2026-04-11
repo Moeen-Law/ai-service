@@ -46,6 +46,8 @@ class LegalChatPayloadValidator(PayloadValidator):
     REQUIRED_FIELDS = ["message"]
     MAX_MESSAGE_LENGTH = 10000
     MAX_HISTORY_LENGTH = 50
+    MAX_FILES_COUNT = 10
+    MAX_FILE_ID_LENGTH = 128
 
     def validate(self, payload: Dict[str, Any], context: Context) -> None:
         """Validate LEGAL_CHAT payload."""
@@ -89,6 +91,38 @@ class LegalChatPayloadValidator(PayloadValidator):
                 message=f"conversation_history exceeds maximum length of {self.MAX_HISTORY_LENGTH}",
                 task_type="LEGAL_CHAT",
             )
+
+        # Validate uploaded file IDs if present
+        files_ids = payload.get("files_ids")
+        if files_ids is None:
+            return
+
+        if not isinstance(files_ids, list):
+            raise PayloadValidationError(
+                message="files_ids must be a list",
+                task_type="LEGAL_CHAT",
+            )
+
+        if len(files_ids) > self.MAX_FILES_COUNT:
+            raise PayloadValidationError(
+                message=f"files_ids exceeds maximum length of {self.MAX_FILES_COUNT}",
+                task_type="LEGAL_CHAT",
+            )
+
+        for file_id in files_ids:
+            if not isinstance(file_id, str) or not file_id.strip():
+                raise PayloadValidationError(
+                    message="files_ids must contain non-empty strings",
+                    task_type="LEGAL_CHAT",
+                )
+            if len(file_id.strip()) > self.MAX_FILE_ID_LENGTH:
+                raise PayloadValidationError(
+                    message=(
+                        "files_ids contains a value exceeding maximum length "
+                        f"of {self.MAX_FILE_ID_LENGTH}"
+                    ),
+                    task_type="LEGAL_CHAT",
+                )
 
 
 class DocumentGenerationPayloadValidator(PayloadValidator):

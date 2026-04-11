@@ -50,6 +50,19 @@ class Settings(BaseSettings):
     MAX_REQUEST_SIZE_MB: int = 10
     REQUEST_TIMEOUT_SECONDS: int = 30
 
+    # --- Files Service (uploaded file retrieval) ---
+    FILES_SERVICE_BASE_URL: str = ""
+    FILES_SERVICE_DOWNLOAD_PATH_TEMPLATE: str = "/files/{file_id}"
+    FILES_SERVICE_AUTH_TOKEN: str = ""
+    FILES_SERVICE_TIMEOUT_SECONDS: int = 20
+    FILES_SERVICE_VERIFY_TLS: bool = True
+
+    # --- Uploaded file processing limits ---
+    FILES_MAX_COUNT: int = 10
+    FILES_MAX_SIZE_BYTES: int = 8 * 1024 * 1024
+    FILES_MAX_EXTRACTED_CHARS_PER_FILE: int = 15000
+    FILES_MAX_EXTRACTED_TOTAL_CHARS: int = 50000
+
     # --- AI / LLM Configuration ---
     GEMINI_API_KEY: str = ""
     LLM_MODEL: str = "gemini-2.0-flash"

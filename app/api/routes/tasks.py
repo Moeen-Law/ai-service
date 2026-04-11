@@ -154,6 +154,15 @@ async def stream_task(request: TaskRequest) -> StreamingResponse:
             },
         )
 
+    if request.payload.get("files_ids"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "STREAMING_WITH_FILES_NOT_SUPPORTED",
+                "message": "Streaming with files_ids is not supported yet. Use /ai/tasks instead.",
+            },
+        )
+
     workflow: LegalChatWorkflow = workflow_registry.get(TaskType.LEGAL_CHAT)  # type: ignore[assignment]
 
     async def _event_generator():
