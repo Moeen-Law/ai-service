@@ -8,6 +8,7 @@ Uses structlog for structured logging with request ID propagation.
 import logging
 import sys
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
@@ -124,6 +125,8 @@ class JSONFormatter(logging.Formatter):
 def configure_logging(
     level: str = "INFO",
     json_format: bool = True,
+    log_file_path: str = "logs/ai-service.log",
+    overwrite_log_file: bool = True,
 ) -> None:
     """
     Configure application logging.
@@ -131,29 +134,39 @@ def configure_logging(
     Args:
         level: Log level (DEBUG, INFO, WARNING, ERROR)
         json_format: Use JSON formatting (True for production)
+        log_file_path: File path for persisted logs
+        overwrite_log_file: Truncate log file on startup when True
     """
     root_logger = logging.getLogger()
-    root_logger.setLevel(getattr(logging, level.upper()))
+    resolved_level = getattr(logging, level.upper())
+    root_logger.setLevel(resolved_level)
 
     # Remove existing handlers
     root_logger.handlers.clear()
 
-    # Create handler
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(getattr(logging, level.upper()))
-
     if json_format:
-        handler.setFormatter(JSONFormatter())
+        formatter: logging.Formatter = JSONFormatter()
     else:
         # Human-readable format for development
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
+        formatter = logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
 
-    root_logger.addHandler(handler)
+    # Keep console logs for local visibility
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(resolved_level)
+    stream_handler.setFormatter(formatter)
+    root_logger.addHandler(stream_handler)
+
+    # Persist logs to a single file; mode='w' overwrites each run
+    log_path = Path(log_file_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    file_mode = "w" if overwrite_log_file else "a"
+    file_handler = logging.FileHandler(log_path, mode=file_mode, encoding="utf-8")
+    file_handler.setLevel(resolved_level)
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
 
     # Suppress noisy loggers
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

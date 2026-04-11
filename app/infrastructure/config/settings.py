@@ -6,6 +6,7 @@ All settings are loaded from environment variables or .env file.
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,6 +39,8 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     LOG_FORMAT: Literal["json", "text"] = "json"
+    LOG_FILE_PATH: str = str(Path("logs") / "ai-service.log")
+    LOG_OVERWRITE_ON_START: bool = True
 
     # API Configuration
     API_V1_PREFIX: str = "/v1"

@@ -24,6 +24,8 @@ settings = get_settings()
 configure_logging(
     level="DEBUG" if settings.DEBUG else "INFO",
     json_format=settings.is_production,
+    log_file_path=settings.LOG_FILE_PATH,
+    overwrite_log_file=settings.LOG_OVERWRITE_ON_START,
 )
 
 logger = get_logger(__name__)
