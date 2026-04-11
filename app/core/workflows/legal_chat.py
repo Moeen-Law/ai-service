@@ -11,6 +11,7 @@ import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 from uuid import UUID
 
+from app.core.services.llm_json import extract_first_json_object
 from app.core.services.file_text_extractor import FileTextExtractor
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import Intent, TaskStatus, TaskType
@@ -21,9 +22,14 @@ from app.infrastructure.logging.logger import get_logger
 from app.interfaces.ai.llm_service import LLMServiceInterface
 from app.interfaces.ai.prompt_service import PromptServiceInterface
 from app.interfaces.ai.rag_service import RAGServiceInterface
+from app.interfaces.external.file_generation_service import (
+    FileGenerationRequest,
+    FileGenerationServiceInterface,
+)
 from app.interfaces.external.file_service import ExternalFileServiceInterface
 from app.shared.errors.exceptions import (
     FileExtractionError,
+    FileGenerationError,
     FilesServiceError,
     PayloadValidationError,
 )
@@ -53,6 +59,7 @@ class LegalChatWorkflow(BaseWorkflow):
         prompt_service: PromptServiceInterface,
         file_service: Optional[ExternalFileServiceInterface] = None,
         file_text_extractor: Optional[FileTextExtractor] = None,
+        file_generation_service: Optional[FileGenerationServiceInterface] = None,
         max_frontend_sources: int = 7,
     ) -> None:
         self._rag = rag_service
@@ -66,6 +73,7 @@ class LegalChatWorkflow(BaseWorkflow):
         )
         self._file_service = file_service
         self._file_text_extractor = file_text_extractor or FileTextExtractor()
+        self._file_generation_service = file_generation_service
         self._max_sources = max_frontend_sources
         # Keep legacy patterns as fallback
         self._social_only_patterns = [
@@ -105,6 +113,16 @@ class LegalChatWorkflow(BaseWorkflow):
         retrieval_k = payload.get("retrieval_k", 4)
         conversation_history = payload.get("conversation_history", [])
         files_ids = self._normalize_file_ids(payload.get("files_ids"))
+
+        # Prompt-only file generation path (Task 2)
+        if self._is_generation_prompt(message) and not files_ids:
+            return await self._generate_docx_from_prompt(
+                task_id=task_id,
+                context=context,
+                message=message,
+                start_time=start_time,
+                options=options,
+            )
 
         # Step 1: Classify intent
         classification = await self._intent_classifier.classify(message)
@@ -242,6 +260,144 @@ class LegalChatWorkflow(BaseWorkflow):
                 tokens_used=resp.tokens_used,
             ),
         )
+
+    async def _generate_docx_from_prompt(
+        self,
+        task_id: str,
+        context: Context,
+        message: str,
+        start_time: float,
+        options: Optional[ExecutionOptions],
+    ) -> Result:
+        """Generate document content from prompt and return mocked file IDs."""
+        if self._file_generation_service is None:
+            raise FileGenerationError(
+                message="File generation service is not configured",
+                details={"field": "file_generation_service"},
+            )
+
+        # Retrieve legal context to ground the generated draft.
+        pipeline_result = await self._pipeline.run(
+            question=f"صياغة مستند قانوني: {message}",
+            retrieval_k=6,
+        )
+
+        template = await self._prompt.get_template(
+            task_type="DOCUMENT_GENERATION",
+            jurisdiction=context.jurisdiction.value,
+            language=context.language.value,
+        )
+        assembled = await self._prompt.assemble_prompt(
+            template=template,
+            variables={
+                "document_type": "docx",
+                "parameters": message,
+                "context": pipeline_result.context or "لا توجد مواد قانونية متاحة",
+            },
+        )
+
+        from app.interfaces.ai.llm_service import LLMRequest
+
+        structured_prompt = (
+            f"{assembled.prompt}\n\n"
+            "أعد النتيجة كـ JSON صالح فقط بدون أي نص إضافي وفق هذا الشكل:\n"
+            '{"document_content":"..."}'
+        )
+        resp = await self._llm.generate(LLMRequest(prompt=structured_prompt))
+        parsed = extract_first_json_object(resp.content)
+
+        generated_content = str(resp.content).strip()
+        if parsed:
+            generated_content = (
+                str(parsed.get("document_content", "")).strip() or generated_content
+            )
+
+        filename = self._build_generated_filename(message)
+        generated_file = await self._file_generation_service.generate_docx(
+            FileGenerationRequest(
+                source_prompt=message,
+                content=generated_content,
+                filename=filename,
+                metadata={"task_type": TaskType.LEGAL_CHAT.value, "mode": "generation"},
+            )
+        )
+
+        include_sources = options.include_sources if options is not None else True
+        frontend_sources = (
+            pipeline_result.sources[: self._max_sources] if include_sources else []
+        )
+
+        execution_time_ms = int((time.time() - start_time) * 1000)
+        return Result.success(
+            task_id=UUID(task_id),
+            task_type=TaskType.LEGAL_CHAT,
+            data={
+                "message": generated_content,
+                "document_content": generated_content,
+                "format": "docx",
+                "files_ids": [generated_file.file_id],
+                "generated_file": {
+                    "file_id": generated_file.file_id,
+                    "filename": generated_file.filename,
+                    "content_type": generated_file.content_type,
+                    "size_bytes": generated_file.size_bytes,
+                },
+                "sources": frontend_sources,
+                "intent": "document_generation",
+            },
+            metadata=ResultMetadata(
+                execution_time_ms=execution_time_ms,
+                model_used=resp.model,
+                tokens_used=resp.tokens_used,
+            ),
+        )
+
+    @staticmethod
+    def _is_generation_prompt(message: str) -> bool:
+        """Heuristic intent detection for prompt-based document generation."""
+        text = (message or "").strip().lower()
+        if not text:
+            return False
+
+        action_patterns = [
+            r"\bgenerate\b",
+            r"\bcreate\b",
+            r"\bdraft\b",
+            r"\bwrite\b",
+            r"انش",
+            r"أنش",
+            r"اكتب",
+            r"صياغ",
+            r"حرر",
+            r"جهز",
+            r"ولد",
+        ]
+        doc_patterns = [
+            r"\bcontract\b",
+            r"\bagreement\b",
+            r"\bdocument\b",
+            r"\bdocx\b",
+            r"عقد",
+            r"اتفاق",
+            r"مستند",
+            r"مذكرة",
+            r"خطاب",
+            r"لائحة",
+        ]
+
+        has_action = any(re.search(pattern, text) for pattern in action_patterns)
+        has_doc_keyword = any(re.search(pattern, text) for pattern in doc_patterns)
+        return has_action and has_doc_keyword
+
+    @staticmethod
+    def _build_generated_filename(message: str) -> str:
+        """Build a deterministic filename from prompt text and timestamp."""
+        clean = re.sub(r"[^\w\s-]", "", (message or "").strip().lower())
+        tokens = [token for token in clean.split() if token]
+        slug = "_".join(tokens[:6]) if tokens else "generated_document"
+        slug = slug[:40] if slug else "generated_document"
+        timestamp = int(time.time())
+        return f"{slug}_{timestamp}.docx"
 
     async def _build_uploaded_files_context(self, files_ids: List[str]) -> str:
         """Fetch uploaded files by IDs and convert them into prompt-ready text."""

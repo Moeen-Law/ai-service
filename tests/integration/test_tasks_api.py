@@ -6,8 +6,12 @@ Tests the /v1/ai/tasks endpoint with full orchestration pipeline.
 
 import pytest
 from fastapi.testclient import TestClient
+from uuid import uuid4
 
+from app.api.routes import tasks as tasks_route
 from app.api.main import create_app
+from app.core.domain.entities import Result, ResultMetadata
+from app.core.domain.enums import TaskType
 
 
 class TestTasksAPI:
@@ -322,3 +326,50 @@ class TestTasksAPI:
         assert response.status_code == 400
         data = response.json()
         assert data["detail"]["code"] == "STREAMING_WITH_FILES_NOT_SUPPORTED"
+
+    def test_legal_chat_prompt_generation_returns_files_ids(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test LEGAL_CHAT generation prompt returns generated file IDs."""
+
+        async def fake_execute(*args, **kwargs):
+            return Result.success(
+                task_id=uuid4(),
+                task_type=TaskType.LEGAL_CHAT,
+                data={
+                    "message": "Generated contract text",
+                    "document_content": "Generated contract text",
+                    "format": "docx",
+                    "files_ids": ["mock_file_123"],
+                },
+                metadata=ResultMetadata(
+                    execution_time_ms=12,
+                    model_used="fake-model",
+                    tokens_used=20,
+                ),
+            )
+
+        monkeypatch.setattr(tasks_route.task_orchestrator, "execute", fake_execute)
+
+        response = client.post(
+            "/v1/ai/tasks",
+            json={
+                "task_type": "LEGAL_CHAT",
+                "context": {
+                    "jurisdiction": "EGYPT",
+                    "language": "ar",
+                },
+                "payload": {
+                    "message": "Generate a contract for apartment rental between two parties",
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["task_type"] == "LEGAL_CHAT"
+        assert data["status"] == "success"
+        assert "result" in data
+        assert "files_ids" in data["result"]
+        assert isinstance(data["result"]["files_ids"], list)
+        assert len(data["result"]["files_ids"]) == 1

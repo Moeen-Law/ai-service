@@ -6,6 +6,10 @@ from app.infrastructure.adapters.file_service_adapter import (
     HTTPFileService,
     file_service,
 )
+from app.infrastructure.adapters.file_generation_adapter import (
+    MockFileGenerationService,
+    file_generation_service,
+)
 from app.infrastructure.adapters.llm_adapter import GeminiLLMService, llm_service
 from app.infrastructure.adapters.prompt_adapter import (
     LegalPromptService,
@@ -17,6 +21,9 @@ __all__ = [
     # Files Adapter
     "HTTPFileService",
     "file_service",
+    # File Generation Adapter
+    "MockFileGenerationService",
+    "file_generation_service",
     # LLM Adapter
     "GeminiLLMService",
     "llm_service",

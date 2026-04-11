@@ -47,6 +47,18 @@ class LegalChatResult(BaseModel):
         default=None,
         description="Reference sources used in the response",
     )
+    files_ids: Optional[List[str]] = Field(
+        default=None,
+        description="Generated or associated file IDs",
+    )
+    document_content: Optional[str] = Field(
+        default=None,
+        description="Generated document content when generation mode is used",
+    )
+    format: Optional[str] = Field(
+        default=None,
+        description="Generated document format",
+    )
 
 
 class DocumentGenerationResult(BaseModel):

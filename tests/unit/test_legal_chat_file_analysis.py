@@ -28,6 +28,11 @@ from app.interfaces.external.file_service import (
     ExternalFile,
     ExternalFileServiceInterface,
 )
+from app.interfaces.external.file_generation_service import (
+    FileGenerationRequest,
+    FileGenerationServiceInterface,
+    GeneratedFile,
+)
 from app.shared.errors.exceptions import FileExtractionError, PayloadValidationError
 
 
@@ -148,6 +153,19 @@ class FakeFileService(ExternalFileServiceInterface):
 
     async def fetch_files(self, file_ids: List[str]) -> List[ExternalFile]:
         return self._files
+
+    async def health_check(self) -> bool:
+        return True
+
+
+class FakeFileGenerationService(FileGenerationServiceInterface):
+    async def generate_docx(self, request: FileGenerationRequest) -> GeneratedFile:
+        return GeneratedFile(
+            file_id="mock_file_123",
+            filename=request.filename,
+            content_type=request.content_type,
+            size_bytes=max(1, len(request.content.encode("utf-8"))),
+        )
 
     async def health_check(self) -> bool:
         return True
@@ -327,3 +345,41 @@ async def test_legal_chat_files_extraction_error_is_payload_validation(
         )
 
     assert exc_info.value.code == "PAYLOAD_VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_legal_chat_generation_prompt_returns_content_and_files_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    egypt_context: Context,
+) -> None:
+    llm = FakeLLMService(response_text='{"document_content":"Generated contract text"}')
+    workflow = LegalChatWorkflow(
+        rag_service=FakeRAGService(),
+        llm_service=llm,
+        prompt_service=FakePromptService(),
+        file_generation_service=FakeFileGenerationService(),
+    )
+
+    async def fake_pipeline_run(**_: Any) -> PipelineResult:
+        return PipelineResult(
+            context="relevant legal context",
+            sources=[{"id": "src1"}],
+            preferred_domain="civil",
+            question_numbers=[],
+        )
+
+    monkeypatch.setattr(workflow._pipeline, "run", fake_pipeline_run)
+
+    result = await workflow.execute(
+        task_id=str(uuid4()),
+        context=egypt_context,
+        payload={
+            "message": "Generate a contract for apartment rental between two parties",
+        },
+    )
+
+    assert result.data["intent"] == "document_generation"
+    assert result.data["format"] == "docx"
+    assert result.data["document_content"] == "Generated contract text"
+    assert result.data["message"] == "Generated contract text"
+    assert result.data["files_ids"] == ["mock_file_123"]

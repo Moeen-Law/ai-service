@@ -252,3 +252,14 @@ class FileExtractionError(AIServiceError):
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(message, "FILE_EXTRACTION_ERROR", details)
+
+
+class FileGenerationError(AIServiceError):
+    """Exception raised when generated-file creation fails."""
+
+    def __init__(
+        self,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message, "FILE_GENERATION_ERROR", details)

@@ -11,6 +11,7 @@ from app.core.workflows.document_generation import DocumentGenerationWorkflow
 from app.core.workflows.legal_chat import LegalChatWorkflow
 from app.core.workflows.registry import WorkflowRegistry, workflow_registry
 from app.infrastructure.adapters import (
+    file_generation_service,
     file_service,
     llm_service,
     prompt_service,
@@ -32,7 +33,13 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
     # Register each workflow for its corresponding task type
     reg.register(
         TaskType.LEGAL_CHAT,
-        LegalChatWorkflow(rag_service, llm_service, prompt_service, file_service),
+        LegalChatWorkflow(
+            rag_service,
+            llm_service,
+            prompt_service,
+            file_service,
+            file_generation_service=file_generation_service,
+        ),
     )
     reg.register(
         TaskType.DOCUMENT_GENERATION,
