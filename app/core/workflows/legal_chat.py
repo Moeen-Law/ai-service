@@ -11,7 +11,8 @@ import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 from uuid import UUID
 
-from app.core.services.llm_json import extract_first_json_object
+from langchain_core.tools import tool
+
 from app.core.services.file_text_extractor import FileTextExtractor
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import Intent, TaskStatus, TaskType
@@ -106,7 +107,7 @@ class LegalChatWorkflow(BaseWorkflow):
         payload: Dict[str, Any],
         options: Optional[ExecutionOptions] = None,
     ) -> Result:
-        """Non-streaming execution path — returns a complete answer."""
+        """Non-streaming execution path using model-driven tool selection."""
         start_time = time.time()
 
         message = payload.get("message", "")
@@ -114,110 +115,17 @@ class LegalChatWorkflow(BaseWorkflow):
         conversation_history = payload.get("conversation_history", [])
         files_ids = self._normalize_file_ids(payload.get("files_ids"))
 
-        # Prompt-only file generation path (Task 2)
-        if self._is_generation_prompt(message) and not files_ids:
-            return await self._generate_docx_from_prompt(
-                task_id=task_id,
-                context=context,
-                message=message,
-                start_time=start_time,
-                options=options,
+        if files_ids and self._file_service is None:
+            raise FilesServiceError(
+                message="Files service integration is not configured",
+                details={"field": "file_service"},
             )
 
-        # Step 1: Classify intent
-        classification = await self._intent_classifier.classify(message)
-        logger.debug(
-            f"Intent: {classification.intent.value} "
-            f"(confidence: {classification.confidence})"
-        )
-
-        # Step 2: Route based on intent
-        if classification.intent == Intent.CHITCHAT and not files_ids:
-            return Result.success(
-                task_id=UUID(task_id),
-                task_type=TaskType.LEGAL_CHAT,
-                data={
-                    "message": self._build_chitchat_response(message),
-                    "sources": [],
-                    "intent": Intent.CHITCHAT.value,
-                },
-                metadata=ResultMetadata(
-                    execution_time_ms=int((time.time() - start_time) * 1000),
-                    model_used="rule-based",
-                ),
-            )
-
-        if classification.intent == Intent.OUT_OF_SCOPE and not files_ids:
-            return Result.success(
-                task_id=UUID(task_id),
-                task_type=TaskType.LEGAL_CHAT,
-                data={
-                    "message": self._build_out_of_scope_response(),
-                    "sources": [],
-                    "intent": Intent.OUT_OF_SCOPE.value,
-                },
-                metadata=ResultMetadata(
-                    execution_time_ms=int((time.time() - start_time) * 1000),
-                    model_used="rule-based",
-                ),
-            )
-
-        if classification.intent == Intent.VAGUE and not files_ids:
-            clarification = (
-                classification.suggested_clarification
-                or "تقصد بخصوص قانون العمل، أم قانون مدني، أم غيره؟"
-            )
-            return Result.success(
-                task_id=UUID(task_id),
-                task_type=TaskType.LEGAL_CHAT,
-                data={
-                    "message": f"السؤال غير واضح تماماً. {clarification}",
-                    "sources": [],
-                    "intent": Intent.VAGUE.value,
-                },
-                metadata=ResultMetadata(
-                    execution_time_ms=int((time.time() - start_time) * 1000),
-                    model_used="rule-based",
-                ),
-            )
-
-        # Step 3: Full legal query processing
-        uploaded_files_context = await self._build_uploaded_files_context(files_ids)
-
-        # If intent is legal_query, proceed with full pipeline
-        # 1. Retrieval pipeline (pass precomputed rewrite data to avoid duplicate LLM call)
         pipeline_result = await self._pipeline.run(
             question=message,
             retrieval_k=retrieval_k,
-            precomputed_domain=classification.domain,
-            precomputed_keywords=classification.keywords,
-            precomputed_articles=classification.likely_articles,
         )
 
-        combined_context = self._merge_contexts(
-            legal_context=pipeline_result.context,
-            uploaded_files_context=uploaded_files_context,
-        )
-
-        if not combined_context:
-            return Result.success(
-                task_id=UUID(task_id),
-                task_type=TaskType.LEGAL_CHAT,
-                data={
-                    "message": (
-                        "عذراً، لم أتمكن من العثور على مواد قانونية ذات صلة بسؤالك. "
-                        "يرجى إعادة صياغة السؤال أو التأكد من صحة المصطلحات المستخدمة."
-                    ),
-                    "sources": [],
-                    "intent": Intent.LEGAL_QUERY.value,
-                },
-                metadata=ResultMetadata(
-                    execution_time_ms=int((time.time() - start_time) * 1000),
-                    model_used="none",
-                ),
-            )
-
-        # 2. Assemble prompt
         template = await self._prompt.get_template(
             task_type="LEGAL_CHAT",
             jurisdiction=context.jurisdiction.value,
@@ -227,33 +135,62 @@ class LegalChatWorkflow(BaseWorkflow):
             template=template,
             variables={
                 "question": message,
-                "context": combined_context,
+                "context": pipeline_result.context,
                 "conversation_history": self._format_conversation_history(
                     conversation_history
                 ),
             },
         )
 
-        # 3. Generate answer
         from app.interfaces.ai.llm_service import LLMRequest
 
-        resp = await self._llm.generate(LLMRequest(prompt=assembled.prompt))
+        tools = self._build_agent_tools(files_ids=files_ids, source_prompt=message)
+        include_sources = options.include_sources if options is not None else True
+
+        resp = await self._llm.generate_with_tools(
+            LLMRequest(
+                prompt=assembled.prompt,
+                system_prompt=self._build_agent_system_prompt(files_ids=files_ids),
+            ),
+            tools=tools,
+        )
         answer = resp.content
 
-        # 4. Filter cited sources
-        cited = self._pipeline.filter_cited_sources(answer, pipeline_result.sources)
-        frontend_sources = cited[: self._max_sources]
+        generation_payload = self._extract_generation_tool_payload(resp.metadata)
+        if generation_payload is not None:
+            frontend_sources = (
+                pipeline_result.sources[: self._max_sources] if include_sources else []
+            )
+            result_data = {
+                "message": generation_payload.get("document_content") or answer,
+                "document_content": generation_payload.get("document_content")
+                or answer,
+                "format": generation_payload.get("format", "docx"),
+                "files_ids": generation_payload.get("files_ids", []),
+                "generated_file": {
+                    "file_id": generation_payload.get("file_id"),
+                    "filename": generation_payload.get("filename"),
+                    "content_type": generation_payload.get("content_type"),
+                    "size_bytes": generation_payload.get("size_bytes"),
+                },
+                "sources": frontend_sources,
+                "intent": "document_generation",
+            }
+        else:
+            cited = self._pipeline.filter_cited_sources(answer, pipeline_result.sources)
+            frontend_sources = cited[: self._max_sources] if include_sources else []
+            result_data = {
+                "message": answer,
+                "sources": frontend_sources,
+                "intent": Intent.LEGAL_QUERY.value,
+            }
 
         execution_time_ms = int((time.time() - start_time) * 1000)
 
         return Result.success(
             task_id=UUID(task_id),
             task_type=TaskType.LEGAL_CHAT,
-            data={
-                "message": answer,
-                "sources": frontend_sources,
-                "intent": Intent.LEGAL_QUERY.value,
-            },
+            data=result_data,
             metadata=ResultMetadata(
                 execution_time_ms=execution_time_ms,
                 model_used=resp.model,
@@ -261,133 +198,127 @@ class LegalChatWorkflow(BaseWorkflow):
             ),
         )
 
-    async def _generate_docx_from_prompt(
-        self,
-        task_id: str,
-        context: Context,
-        message: str,
-        start_time: float,
-        options: Optional[ExecutionOptions],
-    ) -> Result:
-        """Generate document content from prompt and return mocked file IDs."""
-        if self._file_generation_service is None:
-            raise FileGenerationError(
-                message="File generation service is not configured",
-                details={"field": "file_generation_service"},
-            )
+    def _build_agent_tools(self, files_ids: List[str], source_prompt: str) -> List[Any]:
+        """Build model-callable tools for LEGAL_CHAT analysis/generation."""
+        tools: List[Any] = []
 
-        # Retrieve legal context to ground the generated draft.
-        pipeline_result = await self._pipeline.run(
-            question=f"صياغة مستند قانوني: {message}",
-            retrieval_k=6,
-        )
+        if files_ids and self._file_service is not None:
+            allowed_file_ids = list(files_ids)
+            allowed_file_ids_set = set(allowed_file_ids)
 
-        template = await self._prompt.get_template(
-            task_type="DOCUMENT_GENERATION",
-            jurisdiction=context.jurisdiction.value,
-            language=context.language.value,
-        )
-        assembled = await self._prompt.assemble_prompt(
-            template=template,
-            variables={
-                "document_type": "docx",
-                "parameters": message,
-                "context": pipeline_result.context or "لا توجد مواد قانونية متاحة",
-            },
-        )
+            @tool("get_uploaded_files_content")
+            async def get_uploaded_files_content(
+                file_ids: Optional[List[str]] = None,
+            ) -> Dict[str, Any]:
+                """Fetch uploaded files text by IDs from payload.files_ids and return merged content."""
+                target_file_ids = file_ids or allowed_file_ids
+                invalid_file_ids = [
+                    file_id
+                    for file_id in target_file_ids
+                    if file_id not in allowed_file_ids_set
+                ]
+                if invalid_file_ids:
+                    raise PayloadValidationError(
+                        message="One or more file IDs are not allowed for this request",
+                        task_type=TaskType.LEGAL_CHAT.value,
+                        details={"invalid_files_ids": invalid_file_ids},
+                    )
 
-        from app.interfaces.ai.llm_service import LLMRequest
+                merged_context = await self._build_uploaded_files_context(
+                    target_file_ids
+                )
+                return {
+                    "files_ids": target_file_ids,
+                    "files_context": merged_context,
+                    "total_files": len(target_file_ids),
+                }
 
-        structured_prompt = (
-            f"{assembled.prompt}\n\n"
-            "أعد النتيجة كـ JSON صالح فقط بدون أي نص إضافي وفق هذا الشكل:\n"
-            '{"document_content":"..."}'
-        )
-        resp = await self._llm.generate(LLMRequest(prompt=structured_prompt))
-        parsed = extract_first_json_object(resp.content)
+            tools.append(get_uploaded_files_content)
 
-        generated_content = str(resp.content).strip()
-        if parsed:
-            generated_content = (
-                str(parsed.get("document_content", "")).strip() or generated_content
-            )
+        if self._file_generation_service is not None:
 
-        filename = self._build_generated_filename(message)
-        generated_file = await self._file_generation_service.generate_docx(
-            FileGenerationRequest(
-                source_prompt=message,
-                content=generated_content,
-                filename=filename,
-                metadata={"task_type": TaskType.LEGAL_CHAT.value, "mode": "generation"},
-            )
-        )
+            @tool("generate_docx")
+            async def generate_docx(
+                document_content: str,
+                filename: Optional[str] = None,
+            ) -> Dict[str, Any]:
+                """Generate DOCX output from provided legal document content."""
+                clean_content = (document_content or "").strip()
+                if not clean_content:
+                    raise FileGenerationError(
+                        message="document_content must not be empty",
+                        details={"field": "document_content"},
+                    )
 
-        include_sources = options.include_sources if options is not None else True
-        frontend_sources = (
-            pipeline_result.sources[: self._max_sources] if include_sources else []
-        )
+                final_filename = (
+                    filename or self._build_generated_filename(source_prompt)
+                ).strip()
+                if not final_filename:
+                    final_filename = self._build_generated_filename(source_prompt)
 
-        execution_time_ms = int((time.time() - start_time) * 1000)
-        return Result.success(
-            task_id=UUID(task_id),
-            task_type=TaskType.LEGAL_CHAT,
-            data={
-                "message": generated_content,
-                "document_content": generated_content,
-                "format": "docx",
-                "files_ids": [generated_file.file_id],
-                "generated_file": {
+                generated_file = await self._file_generation_service.generate_docx(
+                    FileGenerationRequest(
+                        source_prompt=source_prompt,
+                        content=clean_content,
+                        filename=final_filename,
+                        metadata={
+                            "task_type": TaskType.LEGAL_CHAT.value,
+                            "mode": "generation",
+                        },
+                    )
+                )
+
+                return {
+                    "document_content": clean_content,
+                    "format": "docx",
+                    "files_ids": [generated_file.file_id],
                     "file_id": generated_file.file_id,
                     "filename": generated_file.filename,
                     "content_type": generated_file.content_type,
                     "size_bytes": generated_file.size_bytes,
-                },
-                "sources": frontend_sources,
-                "intent": "document_generation",
-            },
-            metadata=ResultMetadata(
-                execution_time_ms=execution_time_ms,
-                model_used=resp.model,
-                tokens_used=resp.tokens_used,
-            ),
+                }
+
+            tools.append(generate_docx)
+
+        return tools
+
+    @staticmethod
+    def _build_agent_system_prompt(files_ids: List[str]) -> str:
+        files_hint = ", ".join(files_ids) if files_ids else "(no uploaded files)"
+        return (
+            "أنت مساعد قانوني محترف. اتخذ قرار استخدام الأدوات بناء على طلب المستخدم فقط.\n"
+            "الأدوات المتاحة:\n"
+            "1) get_uploaded_files_content: لتحليل الملفات المرفوعة.\n"
+            "2) generate_docx: لإنشاء ملف DOCX عندما يطلب المستخدم صياغة مستند.\n"
+            f"File IDs المتاحة من payload.files_ids: {files_hint}\n"
+            "قواعد التشغيل:\n"
+            "- إذا طُلب منك تحليل ملفات مرفوعة، استخدم get_uploaded_files_content قبل الإجابة.\n"
+            "- لا تخترع File IDs غير الموجودة في القائمة المتاحة.\n"
+            "- إذا طُلب إنشاء مستند، أنشئ المحتوى أولا ثم استخدم generate_docx.\n"
+            "- أعد إجابة نهائية واضحة للمستخدم بعد أي استدعاءات أدوات."
         )
 
     @staticmethod
-    def _is_generation_prompt(message: str) -> bool:
-        """Heuristic intent detection for prompt-based document generation."""
-        text = (message or "").strip().lower()
-        if not text:
-            return False
+    def _extract_generation_tool_payload(
+        metadata: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not metadata:
+            return None
 
-        action_patterns = [
-            r"\bgenerate\b",
-            r"\bcreate\b",
-            r"\bdraft\b",
-            r"\bwrite\b",
-            r"انش",
-            r"أنش",
-            r"اكتب",
-            r"صياغ",
-            r"حرر",
-            r"جهز",
-            r"ولد",
-        ]
-        doc_patterns = [
-            r"\bcontract\b",
-            r"\bagreement\b",
-            r"\bdocument\b",
-            r"\bdocx\b",
-            r"عقد",
-            r"اتفاق",
-            r"مستند",
-            r"مذكرة",
-            r"خطاب",
-            r"لائحة",
-        ]
+        invocations = metadata.get("tool_invocations")
+        if not isinstance(invocations, list):
+            return None
 
-        has_action = any(re.search(pattern, text) for pattern in action_patterns)
-        has_doc_keyword = any(re.search(pattern, text) for pattern in doc_patterns)
-        return has_action and has_doc_keyword
+        for invocation in reversed(invocations):
+            if not isinstance(invocation, dict):
+                continue
+            if invocation.get("name") != "generate_docx":
+                continue
+            result = invocation.get("result")
+            if isinstance(result, dict):
+                return result
+
+        return None
 
     @staticmethod
     def _build_generated_filename(message: str) -> str:
@@ -495,135 +426,17 @@ class LegalChatWorkflow(BaseWorkflow):
         normalized_files_ids = self._normalize_file_ids(files_ids)
 
         try:
-            # Prompt-only file generation path (mirrors non-streaming behavior)
-            if self._is_generation_prompt(question) and not normalized_files_ids:
-                if self._file_generation_service is None:
-                    raise FileGenerationError(
-                        message="File generation service is not configured",
-                        details={"field": "file_generation_service"},
-                    )
-
-                pipeline_result = await self._pipeline.run(
-                    question=f"صياغة مستند قانوني: {question}",
-                    retrieval_k=6,
+            if normalized_files_ids and self._file_service is None:
+                raise FilesServiceError(
+                    message="Files service integration is not configured",
+                    details={"field": "file_service"},
                 )
-                t_retrieval = time.perf_counter()
-
-                template = await self._prompt.get_template(
-                    task_type="DOCUMENT_GENERATION",
-                    jurisdiction=jurisdiction,
-                    language=language,
-                )
-                assembled = await self._prompt.assemble_prompt(
-                    template=template,
-                    variables={
-                        "document_type": "docx",
-                        "parameters": question,
-                        "context": pipeline_result.context
-                        or "لا توجد مواد قانونية متاحة",
-                    },
-                )
-
-                from app.interfaces.ai.llm_service import LLMRequest
-
-                structured_prompt = (
-                    f"{assembled.prompt}\n\n"
-                    "أعد النتيجة كـ JSON صالح فقط بدون أي نص إضافي وفق هذا الشكل:\n"
-                    '{"document_content":"..."}'
-                )
-                resp = await self._llm.generate(LLMRequest(prompt=structured_prompt))
-                parsed = extract_first_json_object(resp.content)
-
-                generated_content = str(resp.content).strip()
-                if parsed:
-                    generated_content = (
-                        str(parsed.get("document_content", "")).strip()
-                        or generated_content
-                    )
-
-                filename = self._build_generated_filename(question)
-                generated_file = await self._file_generation_service.generate_docx(
-                    FileGenerationRequest(
-                        source_prompt=question,
-                        content=generated_content,
-                        filename=filename,
-                        metadata={
-                            "task_type": TaskType.LEGAL_CHAT.value,
-                            "mode": "generation",
-                        },
-                    )
-                )
-                t_done = time.perf_counter()
-
-                frontend_sources = (
-                    pipeline_result.sources[: self._max_sources]
-                    if include_sources
-                    else []
-                )
-
-                yield f"data: {json.dumps({'type': 'token', 'content': generated_content}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'generation', 'intent': 'document_generation', 'format': 'docx', 'files_ids': [generated_file.file_id], 'generated_file': {'file_id': generated_file.file_id, 'filename': generated_file.filename, 'content_type': generated_file.content_type, 'size_bytes': generated_file.size_bytes}}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'sources', 'sources': frontend_sources, 'timing': {'retrieval_ms': round((t_retrieval - t_start) * 1000, 1), 'total_ms': round((t_done - t_start) * 1000, 1)}, 'intent': 'document_generation'}, ensure_ascii=False)}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-
-            # Step 1: Classify intent
-            classification = await self._intent_classifier.classify(question)
-            logger.debug(
-                f"Intent: {classification.intent.value} "
-                f"(confidence: {classification.confidence})"
-            )
-
-            # Step 2: Route based on intent
-            if (
-                classification.intent
-                in (Intent.CHITCHAT, Intent.OUT_OF_SCOPE, Intent.VAGUE)
-                and not normalized_files_ids
-            ):
-                if classification.intent == Intent.CHITCHAT:
-                    quick_reply = self._build_chitchat_response(question)
-                elif classification.intent == Intent.OUT_OF_SCOPE:
-                    quick_reply = self._build_out_of_scope_response()
-                else:  # VAGUE
-                    clarification = (
-                        classification.suggested_clarification
-                        or "تقصد بخصوص قانون العمل، أم قانون مدني، أم غيره؟"
-                    )
-                    quick_reply = f"السؤال غير واضح تماماً. {clarification}"
-
-                yield f"data: {json.dumps({'type': 'token', 'content': quick_reply}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'intent': classification.intent.value}, ensure_ascii=False)}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-
-            # Step 3: Full legal query processing
-            uploaded_files_context = await self._build_uploaded_files_context(
-                normalized_files_ids
-            )
 
             pipeline_result = await self._pipeline.run(
                 question=question,
                 retrieval_k=retrieval_k,
-                precomputed_domain=classification.domain,
-                precomputed_keywords=classification.keywords,
-                precomputed_articles=classification.likely_articles,
             )
             t_retrieval = time.perf_counter()
-
-            combined_context = self._merge_contexts(
-                legal_context=pipeline_result.context,
-                uploaded_files_context=uploaded_files_context,
-            )
-
-            if not combined_context:
-                no_result_msg = (
-                    "عذراً، لم أتمكن من العثور على مواد قانونية ذات صلة بسؤالك. "
-                    "يرجى إعادة صياغة السؤال أو التأكد من صحة المصطلحات المستخدمة."
-                )
-                yield f"data: {json.dumps({'type': 'token', 'content': no_result_msg}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'intent': Intent.LEGAL_QUERY.value}, ensure_ascii=False)}\n\n"
-                yield "data: [DONE]\n\n"
-                return
 
             template = await self._prompt.get_template(
                 "LEGAL_CHAT", jurisdiction, language
@@ -632,35 +445,69 @@ class LegalChatWorkflow(BaseWorkflow):
                 template=template,
                 variables={
                     "question": question,
-                    "context": combined_context,
+                    "context": pipeline_result.context,
                     "conversation_history": self._format_conversation_history(
                         conversation_history
                     ),
                 },
             )
 
-            # Stream answer
-            full_answer: list[str] = []
-            t_stream_start = time.perf_counter()
-            async for token in self._llm.astream(assembled.prompt):
-                full_answer.append(token)
-                yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+            from app.interfaces.ai.llm_service import LLMRequest
 
-            t_done = time.perf_counter()
-            complete_answer = "".join(full_answer)
-
-            cited = self._pipeline.filter_cited_sources(
-                complete_answer, pipeline_result.sources
+            tools = self._build_agent_tools(
+                files_ids=normalized_files_ids,
+                source_prompt=question,
             )
-            frontend_sources = cited[: self._max_sources] if include_sources else []
+            resp = await self._llm.generate_with_tools(
+                LLMRequest(
+                    prompt=assembled.prompt,
+                    system_prompt=self._build_agent_system_prompt(
+                        files_ids=normalized_files_ids
+                    ),
+                ),
+                tools=tools,
+            )
+
+            complete_answer = (resp.content or "").strip()
+            if not complete_answer:
+                complete_answer = "عذرا، لم أتمكن من توليد إجابة مناسبة الآن."
+            yield f"data: {json.dumps({'type': 'token', 'content': complete_answer}, ensure_ascii=False)}\n\n"
+
+            generation_payload = self._extract_generation_tool_payload(resp.metadata)
+            t_done = time.perf_counter()
+            if generation_payload is not None:
+                frontend_sources = (
+                    pipeline_result.sources[: self._max_sources]
+                    if include_sources
+                    else []
+                )
+                generation_event = {
+                    "type": "generation",
+                    "intent": "document_generation",
+                    "format": generation_payload.get("format", "docx"),
+                    "files_ids": generation_payload.get("files_ids", []),
+                    "generated_file": {
+                        "file_id": generation_payload.get("file_id"),
+                        "filename": generation_payload.get("filename"),
+                        "content_type": generation_payload.get("content_type"),
+                        "size_bytes": generation_payload.get("size_bytes"),
+                    },
+                }
+                yield f"data: {json.dumps(generation_event, ensure_ascii=False)}\n\n"
+                intent_value = "document_generation"
+            else:
+                cited = self._pipeline.filter_cited_sources(
+                    complete_answer, pipeline_result.sources
+                )
+                frontend_sources = cited[: self._max_sources] if include_sources else []
+                intent_value = Intent.LEGAL_QUERY.value
 
             timing = {
                 "retrieval_ms": round((t_retrieval - t_start) * 1000, 1),
-                "streaming_ms": round((t_done - t_stream_start) * 1000, 1),
                 "total_ms": round((t_done - t_start) * 1000, 1),
             }
 
-            yield f"data: {json.dumps({'type': 'sources', 'sources': frontend_sources, 'timing': timing, 'intent': Intent.LEGAL_QUERY.value}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'sources', 'sources': frontend_sources, 'timing': timing, 'intent': intent_value}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
         except Exception as exc:

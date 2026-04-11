@@ -11,7 +11,6 @@ from app.core.domain.entities import Context
 from app.core.domain.enums import Intent, Jurisdiction, Language
 from app.core.services.file_text_extractor import ExtractedFileText, FileTextExtractor
 from app.core.services.query_pipeline import PipelineResult
-from app.core.validators.intent_classifier import IntentClassificationResult
 from app.core.workflows.legal_chat import LegalChatWorkflow
 from app.interfaces.ai.llm_service import LLMRequest, LLMResponse, LLMServiceInterface
 from app.interfaces.ai.prompt_service import (
@@ -38,9 +37,16 @@ from app.shared.errors.exceptions import FileExtractionError, PayloadValidationE
 
 
 class FakeLLMService(LLMServiceInterface):
-    def __init__(self, response_text: str) -> None:
+    def __init__(
+        self,
+        response_text: str,
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
         self._response_text = response_text
+        self._tool_calls = tool_calls or []
         self.last_prompt: Optional[str] = None
+        self.last_tool_prompt: Optional[str] = None
+        self.last_tool_invocations: List[Dict[str, Any]] = []
         self.last_stream_prompt: Optional[str] = None
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
@@ -65,6 +71,43 @@ class FakeLLMService(LLMServiceInterface):
         self.last_stream_prompt = prompt
         for token in ["tok1", "tok2"]:
             yield token
+
+    async def generate_with_tools(
+        self,
+        request: LLMRequest,
+        tools: List[Any],
+        max_iterations: int = 6,
+    ) -> LLMResponse:
+        self.last_tool_prompt = request.prompt
+        invocations: List[Dict[str, Any]] = []
+
+        for call in self._tool_calls:
+            tool_name = str(call.get("name", "")).strip()
+            if not tool_name:
+                continue
+
+            tool_obj = next((tool for tool in tools if tool.name == tool_name), None)
+            if tool_obj is None:
+                continue
+
+            args = call.get("args", {})
+            if not isinstance(args, dict):
+                args = {}
+            result = await tool_obj.ainvoke(args)
+            invocations.append({"name": tool_name, "args": args, "result": result})
+
+        self.last_tool_invocations = invocations
+
+        return LLMResponse(
+            content=self._response_text,
+            model="fake-llm",
+            tokens_used=12,
+            finish_reason="stop",
+            metadata={
+                "tool_calls_count": len(invocations),
+                "tool_invocations": invocations,
+            },
+        )
 
     async def health_check(self) -> bool:
         return True
@@ -211,7 +254,12 @@ async def test_legal_chat_files_ids_bypass_chitchat_shortcut(
     monkeypatch: pytest.MonkeyPatch,
     egypt_context: Context,
 ) -> None:
-    llm = FakeLLMService(response_text="file analysis response")
+    llm = FakeLLMService(
+        response_text="file analysis response",
+        tool_calls=[
+            {"name": "get_uploaded_files_content", "args": {"file_ids": ["f1"]}}
+        ],
+    )
     workflow = LegalChatWorkflow(
         rag_service=FakeRAGService(),
         llm_service=llm,
@@ -238,13 +286,6 @@ async def test_legal_chat_files_ids_bypass_chitchat_shortcut(
         ),
     )
 
-    async def fake_classify(_: str) -> IntentClassificationResult:
-        return IntentClassificationResult(
-            intent=Intent.CHITCHAT,
-            confidence=0.9,
-            reasoning="chitchat",
-        )
-
     async def fake_pipeline_run(**_: Any) -> PipelineResult:
         return PipelineResult(
             context="",
@@ -253,7 +294,6 @@ async def test_legal_chat_files_ids_bypass_chitchat_shortcut(
             question_numbers=[],
         )
 
-    monkeypatch.setattr(workflow._intent_classifier, "classify", fake_classify)
     monkeypatch.setattr(workflow._pipeline, "run", fake_pipeline_run)
 
     result = await workflow.execute(
@@ -266,29 +306,33 @@ async def test_legal_chat_files_ids_bypass_chitchat_shortcut(
     )
 
     assert result.data["message"] == "file analysis response"
-    assert llm.last_prompt is not None
-    assert "محتوى الملفات المرفوعة من المستخدم" in llm.last_prompt
+    assert llm.last_tool_prompt is not None
+    assert llm.last_tool_invocations
+    tool_result = llm.last_tool_invocations[0]["result"]
+    assert "files_context" in tool_result
 
 
 @pytest.mark.asyncio
-async def test_legal_chat_without_files_keeps_chitchat_shortcut(
+async def test_legal_chat_without_files_returns_llm_response(
     monkeypatch: pytest.MonkeyPatch,
     egypt_context: Context,
 ) -> None:
+    llm = FakeLLMService(response_text="assistant response")
     workflow = LegalChatWorkflow(
         rag_service=FakeRAGService(),
-        llm_service=FakeLLMService(response_text="unused"),
+        llm_service=llm,
         prompt_service=FakePromptService(),
     )
 
-    async def fake_classify(_: str) -> IntentClassificationResult:
-        return IntentClassificationResult(
-            intent=Intent.CHITCHAT,
-            confidence=0.9,
-            reasoning="chitchat",
+    async def fake_pipeline_run(**_: Any) -> PipelineResult:
+        return PipelineResult(
+            context="legal context",
+            sources=[],
+            preferred_domain="civil",
+            question_numbers=[],
         )
 
-    monkeypatch.setattr(workflow._intent_classifier, "classify", fake_classify)
+    monkeypatch.setattr(workflow._pipeline, "run", fake_pipeline_run)
 
     result = await workflow.execute(
         task_id=str(uuid4()),
@@ -296,8 +340,9 @@ async def test_legal_chat_without_files_keeps_chitchat_shortcut(
         payload={"message": "شكرا"},
     )
 
-    assert result.data["intent"] == Intent.CHITCHAT.value
-    assert result.metadata.model_used == "rule-based"
+    assert result.data["intent"] == Intent.LEGAL_QUERY.value
+    assert result.data["message"] == "assistant response"
+    assert result.metadata.model_used == "fake-llm"
 
 
 @pytest.mark.asyncio
@@ -314,7 +359,15 @@ async def test_legal_chat_files_extraction_error_is_payload_validation(
 
     workflow = LegalChatWorkflow(
         rag_service=FakeRAGService(),
-        llm_service=FakeLLMService(response_text="unused"),
+        llm_service=FakeLLMService(
+            response_text="unused",
+            tool_calls=[
+                {
+                    "name": "get_uploaded_files_content",
+                    "args": {"file_ids": ["f1"]},
+                }
+            ],
+        ),
         prompt_service=FakePromptService(),
         file_service=FakeFileService(
             files=[
@@ -329,16 +382,6 @@ async def test_legal_chat_files_extraction_error_is_payload_validation(
         file_text_extractor=FailingExtractor(),
     )
 
-    async def fake_classify(_: str) -> IntentClassificationResult:
-        return IntentClassificationResult(
-            intent=Intent.LEGAL_QUERY,
-            confidence=0.9,
-            reasoning="legal",
-            domain="civil",
-            keywords=["keyword"],
-            likely_articles=[],
-        )
-
     async def fake_pipeline_run(**_: Any) -> PipelineResult:
         return PipelineResult(
             context="some legal context",
@@ -347,7 +390,6 @@ async def test_legal_chat_files_extraction_error_is_payload_validation(
             question_numbers=[],
         )
 
-    monkeypatch.setattr(workflow._intent_classifier, "classify", fake_classify)
     monkeypatch.setattr(workflow._pipeline, "run", fake_pipeline_run)
 
     with pytest.raises(PayloadValidationError) as exc_info:
@@ -368,7 +410,18 @@ async def test_legal_chat_generation_prompt_returns_content_and_files_ids(
     monkeypatch: pytest.MonkeyPatch,
     egypt_context: Context,
 ) -> None:
-    llm = FakeLLMService(response_text='{"document_content":"Generated contract text"}')
+    llm = FakeLLMService(
+        response_text="Generated contract text",
+        tool_calls=[
+            {
+                "name": "generate_docx",
+                "args": {
+                    "document_content": "Generated contract text",
+                    "filename": "generated_contract.docx",
+                },
+            }
+        ],
+    )
     workflow = LegalChatWorkflow(
         rag_service=FakeRAGService(),
         llm_service=llm,
@@ -405,7 +458,12 @@ async def test_legal_chat_generation_prompt_returns_content_and_files_ids(
 async def test_stream_legal_chat_with_files_ids_includes_uploaded_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    llm = FakeLLMService(response_text="unused")
+    llm = FakeLLMService(
+        response_text="analysis answer",
+        tool_calls=[
+            {"name": "get_uploaded_files_content", "args": {"file_ids": ["f1"]}}
+        ],
+    )
     workflow = LegalChatWorkflow(
         rag_service=FakeRAGService(),
         llm_service=llm,
@@ -432,16 +490,6 @@ async def test_stream_legal_chat_with_files_ids_includes_uploaded_context(
         ),
     )
 
-    async def fake_classify(_: str) -> IntentClassificationResult:
-        return IntentClassificationResult(
-            intent=Intent.LEGAL_QUERY,
-            confidence=0.95,
-            reasoning="legal",
-            domain="civil",
-            keywords=["keyword"],
-            likely_articles=[],
-        )
-
     async def fake_pipeline_run(**_: Any) -> PipelineResult:
         return PipelineResult(
             context="legal context",
@@ -450,7 +498,6 @@ async def test_stream_legal_chat_with_files_ids_includes_uploaded_context(
             question_numbers=[],
         )
 
-    monkeypatch.setattr(workflow._intent_classifier, "classify", fake_classify)
     monkeypatch.setattr(workflow._pipeline, "run", fake_pipeline_run)
 
     raw_events = []
@@ -462,8 +509,9 @@ async def test_stream_legal_chat_with_files_ids_includes_uploaded_context(
     ):
         raw_events.append(event)
 
-    assert llm.last_stream_prompt is not None
-    assert "محتوى الملفات المرفوعة من المستخدم" in llm.last_stream_prompt
+    assert llm.last_tool_prompt is not None
+    assert llm.last_tool_invocations
+    assert llm.last_tool_invocations[0]["name"] == "get_uploaded_files_content"
     assert any(event.strip() == "data: [DONE]" for event in raw_events)
 
 
@@ -474,7 +522,16 @@ async def test_stream_generation_prompt_emits_generation_event(
     workflow = LegalChatWorkflow(
         rag_service=FakeRAGService(),
         llm_service=FakeLLMService(
-            response_text='{"document_content":"Generated contract text"}'
+            response_text="Generated contract text",
+            tool_calls=[
+                {
+                    "name": "generate_docx",
+                    "args": {
+                        "document_content": "Generated contract text",
+                        "filename": "generated_contract.docx",
+                    },
+                }
+            ],
         ),
         prompt_service=FakePromptService(),
         file_generation_service=FakeFileGenerationService(),

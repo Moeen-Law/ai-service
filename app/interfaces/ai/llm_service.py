@@ -7,7 +7,7 @@ This is a port in the hexagonal architecture pattern.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -96,6 +96,26 @@ class LLMServiceInterface(ABC):
 
         Yields:
             String tokens as they are generated
+        """
+        pass
+
+    @abstractmethod
+    async def generate_with_tools(
+        self,
+        request: LLMRequest,
+        tools: Sequence[Any],
+        max_iterations: int = 6,
+    ) -> LLMResponse:
+        """
+        Generate a response using model-driven tool calling.
+
+        Args:
+            request: The LLM request with prompt/system prompt
+            tools: A sequence of tool objects usable by the model
+            max_iterations: Maximum tool-calling loop iterations
+
+        Returns:
+            LLMResponse with the final assistant content
         """
         pass
 
