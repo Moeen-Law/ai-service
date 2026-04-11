@@ -306,8 +306,25 @@ class TestTasksAPI:
         assert response.status_code == 200
         assert response.json()["status"] == "success"
 
-    def test_stream_with_files_ids_not_supported(self, client: TestClient) -> None:
-        """Test stream endpoint rejects files_ids for now."""
+    def test_stream_with_files_ids_supported(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test stream endpoint accepts files_ids and forwards them to workflow."""
+
+        captured_files_ids = []
+
+        class FakeStreamWorkflow:
+            async def stream(self, **kwargs):
+                captured_files_ids.extend(kwargs.get("files_ids") or [])
+                yield 'data: {"type":"token","content":"ok"}\n\n'
+                yield "data: [DONE]\n\n"
+
+        monkeypatch.setattr(
+            tasks_route.workflow_registry,
+            "get",
+            lambda _task_type: FakeStreamWorkflow(),
+        )
+
         response = client.post(
             "/v1/ai/tasks/stream",
             json={
@@ -323,9 +340,9 @@ class TestTasksAPI:
             },
         )
 
-        assert response.status_code == 400
-        data = response.json()
-        assert data["detail"]["code"] == "STREAMING_WITH_FILES_NOT_SUPPORTED"
+        assert response.status_code == 200
+        assert "ok" in response.text
+        assert captured_files_ids == ["file_123"]
 
     def test_legal_chat_prompt_generation_returns_files_ids(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

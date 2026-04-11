@@ -479,108 +479,194 @@ class LegalChatWorkflow(BaseWorkflow):
         question: str,
         retrieval_k: int = 4,
         conversation_history: Optional[Any] = None,
+        files_ids: Optional[List[str]] = None,
+        jurisdiction: str = "egypt",
+        language: str = "ar",
+        include_sources: bool = True,
     ) -> AsyncIterator[str]:
         """
         Async generator that yields SSE-formatted events:
           - ``{type: "token", content: "..."}`` for each token
           - ``{type: "sources", sources: [...], timing: {...}}`` at the end
+          - ``{type: "generation", files_ids: [...], ...}`` for generation mode
           - ``[DONE]`` sentinel
         """
         t_start = time.perf_counter()
+        normalized_files_ids = self._normalize_file_ids(files_ids)
 
-        # Step 1: Classify intent
-        classification = await self._intent_classifier.classify(question)
-        logger.debug(
-            f"Intent: {classification.intent.value} "
-            f"(confidence: {classification.confidence})"
-        )
-
-        # Step 2: Route based on intent
-        if classification.intent in (
-            Intent.CHITCHAT,
-            Intent.OUT_OF_SCOPE,
-            Intent.VAGUE,
-        ):
-            if classification.intent == Intent.CHITCHAT:
-                quick_reply = self._build_chitchat_response(question)
-            elif classification.intent == Intent.OUT_OF_SCOPE:
-                quick_reply = self._build_out_of_scope_response()
-            else:  # VAGUE
-                clarification = (
-                    classification.suggested_clarification
-                    or "تقصد بخصوص قانون العمل، أم قانون مدني، أم غيره؟"
-                )
-                quick_reply = f"السؤال غير واضح تماماً. {clarification}"
-
-            yield f"data: {json.dumps({'type': 'token', 'content': quick_reply}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'intent': classification.intent.value}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-            return
-
-        # Step 3: Full legal query processing
-        # Retrieval (pass precomputed rewrite data to avoid duplicate LLM call)
-        pipeline_result = await self._pipeline.run(
-            question=question,
-            retrieval_k=retrieval_k,
-            precomputed_domain=classification.domain,
-            precomputed_keywords=classification.keywords,
-            precomputed_articles=classification.likely_articles,
-        )
-        t_retrieval = time.perf_counter()
-
-        if not pipeline_result.context:
-            no_result_msg = (
-                "عذراً، لم أتمكن من العثور على مواد قانونية ذات صلة بسؤالك. "
-                "يرجى إعادة صياغة السؤال أو التأكد من صحة المصطلحات المستخدمة."
-            )
-            yield f"data: {json.dumps({'type': 'token', 'content': no_result_msg}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'intent': Intent.LEGAL_QUERY.value}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-            return
-
-        # Assemble prompt
-        template = await self._prompt.get_template("LEGAL_CHAT", "egypt", "ar")
-        assembled = await self._prompt.assemble_prompt(
-            template=template,
-            variables={
-                "question": question,
-                "context": pipeline_result.context,
-                "conversation_history": self._format_conversation_history(
-                    conversation_history
-                ),
-            },
-        )
-
-        # Stream answer
-        full_answer: list[str] = []
-        t_stream_start = time.perf_counter()
         try:
+            # Prompt-only file generation path (mirrors non-streaming behavior)
+            if self._is_generation_prompt(question) and not normalized_files_ids:
+                if self._file_generation_service is None:
+                    raise FileGenerationError(
+                        message="File generation service is not configured",
+                        details={"field": "file_generation_service"},
+                    )
+
+                pipeline_result = await self._pipeline.run(
+                    question=f"صياغة مستند قانوني: {question}",
+                    retrieval_k=6,
+                )
+                t_retrieval = time.perf_counter()
+
+                template = await self._prompt.get_template(
+                    task_type="DOCUMENT_GENERATION",
+                    jurisdiction=jurisdiction,
+                    language=language,
+                )
+                assembled = await self._prompt.assemble_prompt(
+                    template=template,
+                    variables={
+                        "document_type": "docx",
+                        "parameters": question,
+                        "context": pipeline_result.context
+                        or "لا توجد مواد قانونية متاحة",
+                    },
+                )
+
+                from app.interfaces.ai.llm_service import LLMRequest
+
+                structured_prompt = (
+                    f"{assembled.prompt}\n\n"
+                    "أعد النتيجة كـ JSON صالح فقط بدون أي نص إضافي وفق هذا الشكل:\n"
+                    '{"document_content":"..."}'
+                )
+                resp = await self._llm.generate(LLMRequest(prompt=structured_prompt))
+                parsed = extract_first_json_object(resp.content)
+
+                generated_content = str(resp.content).strip()
+                if parsed:
+                    generated_content = (
+                        str(parsed.get("document_content", "")).strip()
+                        or generated_content
+                    )
+
+                filename = self._build_generated_filename(question)
+                generated_file = await self._file_generation_service.generate_docx(
+                    FileGenerationRequest(
+                        source_prompt=question,
+                        content=generated_content,
+                        filename=filename,
+                        metadata={
+                            "task_type": TaskType.LEGAL_CHAT.value,
+                            "mode": "generation",
+                        },
+                    )
+                )
+                t_done = time.perf_counter()
+
+                frontend_sources = (
+                    pipeline_result.sources[: self._max_sources]
+                    if include_sources
+                    else []
+                )
+
+                yield f"data: {json.dumps({'type': 'token', 'content': generated_content}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'generation', 'intent': 'document_generation', 'format': 'docx', 'files_ids': [generated_file.file_id], 'generated_file': {'file_id': generated_file.file_id, 'filename': generated_file.filename, 'content_type': generated_file.content_type, 'size_bytes': generated_file.size_bytes}}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'sources', 'sources': frontend_sources, 'timing': {'retrieval_ms': round((t_retrieval - t_start) * 1000, 1), 'total_ms': round((t_done - t_start) * 1000, 1)}, 'intent': 'document_generation'}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            # Step 1: Classify intent
+            classification = await self._intent_classifier.classify(question)
+            logger.debug(
+                f"Intent: {classification.intent.value} "
+                f"(confidence: {classification.confidence})"
+            )
+
+            # Step 2: Route based on intent
+            if (
+                classification.intent
+                in (Intent.CHITCHAT, Intent.OUT_OF_SCOPE, Intent.VAGUE)
+                and not normalized_files_ids
+            ):
+                if classification.intent == Intent.CHITCHAT:
+                    quick_reply = self._build_chitchat_response(question)
+                elif classification.intent == Intent.OUT_OF_SCOPE:
+                    quick_reply = self._build_out_of_scope_response()
+                else:  # VAGUE
+                    clarification = (
+                        classification.suggested_clarification
+                        or "تقصد بخصوص قانون العمل، أم قانون مدني، أم غيره؟"
+                    )
+                    quick_reply = f"السؤال غير واضح تماماً. {clarification}"
+
+                yield f"data: {json.dumps({'type': 'token', 'content': quick_reply}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'intent': classification.intent.value}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            # Step 3: Full legal query processing
+            uploaded_files_context = await self._build_uploaded_files_context(
+                normalized_files_ids
+            )
+
+            pipeline_result = await self._pipeline.run(
+                question=question,
+                retrieval_k=retrieval_k,
+                precomputed_domain=classification.domain,
+                precomputed_keywords=classification.keywords,
+                precomputed_articles=classification.likely_articles,
+            )
+            t_retrieval = time.perf_counter()
+
+            combined_context = self._merge_contexts(
+                legal_context=pipeline_result.context,
+                uploaded_files_context=uploaded_files_context,
+            )
+
+            if not combined_context:
+                no_result_msg = (
+                    "عذراً، لم أتمكن من العثور على مواد قانونية ذات صلة بسؤالك. "
+                    "يرجى إعادة صياغة السؤال أو التأكد من صحة المصطلحات المستخدمة."
+                )
+                yield f"data: {json.dumps({'type': 'token', 'content': no_result_msg}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'sources', 'sources': [], 'intent': Intent.LEGAL_QUERY.value}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            template = await self._prompt.get_template(
+                "LEGAL_CHAT", jurisdiction, language
+            )
+            assembled = await self._prompt.assemble_prompt(
+                template=template,
+                variables={
+                    "question": question,
+                    "context": combined_context,
+                    "conversation_history": self._format_conversation_history(
+                        conversation_history
+                    ),
+                },
+            )
+
+            # Stream answer
+            full_answer: list[str] = []
+            t_stream_start = time.perf_counter()
             async for token in self._llm.astream(assembled.prompt):
                 full_answer.append(token)
                 yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+
+            t_done = time.perf_counter()
+            complete_answer = "".join(full_answer)
+
+            cited = self._pipeline.filter_cited_sources(
+                complete_answer, pipeline_result.sources
+            )
+            frontend_sources = cited[: self._max_sources] if include_sources else []
+
+            timing = {
+                "retrieval_ms": round((t_retrieval - t_start) * 1000, 1),
+                "streaming_ms": round((t_done - t_stream_start) * 1000, 1),
+                "total_ms": round((t_done - t_start) * 1000, 1),
+            }
+
+            yield f"data: {json.dumps({'type': 'sources', 'sources': frontend_sources, 'timing': timing, 'intent': Intent.LEGAL_QUERY.value}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
         except Exception as exc:
             logger.error("stream_error", error=str(exc))
             yield f"data: {json.dumps({'type': 'error', 'content': str(exc)}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
-            return
-
-        t_done = time.perf_counter()
-        complete_answer = "".join(full_answer)
-
-        # Filter cited sources
-        cited = self._pipeline.filter_cited_sources(
-            complete_answer, pipeline_result.sources
-        )
-        frontend_sources = cited[: self._max_sources]
-
-        timing = {
-            "retrieval_ms": round((t_retrieval - t_start) * 1000, 1),
-            "streaming_ms": round((t_done - t_stream_start) * 1000, 1),
-            "total_ms": round((t_done - t_start) * 1000, 1),
-        }
-
-        yield f"data: {json.dumps({'type': 'sources', 'sources': frontend_sources, 'timing': timing, 'intent': Intent.LEGAL_QUERY.value}, ensure_ascii=False)}\n\n"
-        yield "data: [DONE]\n\n"
 
     def _is_social_only_message(self, message: str) -> bool:
         """Legacy fallback pattern matching."""

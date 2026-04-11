@@ -1,5 +1,6 @@
 """Unit tests for LEGAL_CHAT workflow with uploaded files analysis."""
 
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -40,6 +41,7 @@ class FakeLLMService(LLMServiceInterface):
     def __init__(self, response_text: str) -> None:
         self._response_text = response_text
         self.last_prompt: Optional[str] = None
+        self.last_stream_prompt: Optional[str] = None
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
         self.last_prompt = request.prompt
@@ -60,7 +62,9 @@ class FakeLLMService(LLMServiceInterface):
         return await self.generate(LLMRequest(prompt=prompt))
 
     async def astream(self, prompt: str):
-        return None
+        self.last_stream_prompt = prompt
+        for token in ["tok1", "tok2"]:
+            yield token
 
     async def health_check(self) -> bool:
         return True
@@ -169,6 +173,18 @@ class FakeFileGenerationService(FileGenerationServiceInterface):
 
     async def health_check(self) -> bool:
         return True
+
+
+def _decode_sse_json_events(raw_events: List[str]) -> List[Dict[str, Any]]:
+    payloads: List[Dict[str, Any]] = []
+    for event in raw_events:
+        if not event.startswith("data: "):
+            continue
+        data = event[len("data: ") :].strip()
+        if data == "[DONE]":
+            continue
+        payloads.append(json.loads(data))
+    return payloads
 
 
 @dataclass
@@ -383,3 +399,108 @@ async def test_legal_chat_generation_prompt_returns_content_and_files_ids(
     assert result.data["document_content"] == "Generated contract text"
     assert result.data["message"] == "Generated contract text"
     assert result.data["files_ids"] == ["mock_file_123"]
+
+
+@pytest.mark.asyncio
+async def test_stream_legal_chat_with_files_ids_includes_uploaded_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm = FakeLLMService(response_text="unused")
+    workflow = LegalChatWorkflow(
+        rag_service=FakeRAGService(),
+        llm_service=llm,
+        prompt_service=FakePromptService(),
+        file_service=FakeFileService(
+            files=[
+                ExternalFile(
+                    file_id="f1",
+                    filename="notes.txt",
+                    content_type="text/plain",
+                    content=b"sample",
+                )
+            ]
+        ),
+        file_text_extractor=FakeExtractor(
+            extracted_files=[
+                ExtractedFileText(
+                    file_id="f1",
+                    filename="notes.txt",
+                    content_type="text/plain",
+                    text="uploaded content",
+                )
+            ]
+        ),
+    )
+
+    async def fake_classify(_: str) -> IntentClassificationResult:
+        return IntentClassificationResult(
+            intent=Intent.LEGAL_QUERY,
+            confidence=0.95,
+            reasoning="legal",
+            domain="civil",
+            keywords=["keyword"],
+            likely_articles=[],
+        )
+
+    async def fake_pipeline_run(**_: Any) -> PipelineResult:
+        return PipelineResult(
+            context="legal context",
+            sources=[],
+            preferred_domain="civil",
+            question_numbers=[],
+        )
+
+    monkeypatch.setattr(workflow._intent_classifier, "classify", fake_classify)
+    monkeypatch.setattr(workflow._pipeline, "run", fake_pipeline_run)
+
+    raw_events = []
+    async for event in workflow.stream(
+        question="what does this mean",
+        files_ids=["f1"],
+        jurisdiction="egypt",
+        language="ar",
+    ):
+        raw_events.append(event)
+
+    assert llm.last_stream_prompt is not None
+    assert "محتوى الملفات المرفوعة من المستخدم" in llm.last_stream_prompt
+    assert any(event.strip() == "data: [DONE]" for event in raw_events)
+
+
+@pytest.mark.asyncio
+async def test_stream_generation_prompt_emits_generation_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = LegalChatWorkflow(
+        rag_service=FakeRAGService(),
+        llm_service=FakeLLMService(
+            response_text='{"document_content":"Generated contract text"}'
+        ),
+        prompt_service=FakePromptService(),
+        file_generation_service=FakeFileGenerationService(),
+    )
+
+    async def fake_pipeline_run(**_: Any) -> PipelineResult:
+        return PipelineResult(
+            context="legal context",
+            sources=[],
+            preferred_domain="civil",
+            question_numbers=[],
+        )
+
+    monkeypatch.setattr(workflow._pipeline, "run", fake_pipeline_run)
+
+    raw_events = []
+    async for event in workflow.stream(
+        question="Generate a contract for apartment rental",
+        jurisdiction="egypt",
+        language="ar",
+    ):
+        raw_events.append(event)
+
+    payloads = _decode_sse_json_events(raw_events)
+    generation_events = [p for p in payloads if p.get("type") == "generation"]
+
+    assert generation_events
+    assert generation_events[0]["files_ids"] == ["mock_file_123"]
+    assert generation_events[0]["format"] == "docx"

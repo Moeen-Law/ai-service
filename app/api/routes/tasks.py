@@ -142,6 +142,7 @@ async def stream_task(request: TaskRequest) -> StreamingResponse:
     SSE event types:
     - ``token``: individual LLM token
     - ``sources``: JSON array of cited sources + timing
+    - ``generation``: metadata for generated file outputs (files_ids, format)
     - ``done``: signals the end of the stream (data = ``[DONE]``)
     - ``error``: error message
     """
@@ -154,22 +155,20 @@ async def stream_task(request: TaskRequest) -> StreamingResponse:
             },
         )
 
-    if request.payload.get("files_ids"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "STREAMING_WITH_FILES_NOT_SUPPORTED",
-                "message": "Streaming with files_ids is not supported yet. Use /ai/tasks instead.",
-            },
-        )
-
     workflow: LegalChatWorkflow = workflow_registry.get(TaskType.LEGAL_CHAT)  # type: ignore[assignment]
 
     async def _event_generator():
         try:
             async for event in workflow.stream(
                 question=request.payload.get("message", ""),
+                retrieval_k=request.payload.get("retrieval_k", 4),
                 conversation_history=request.payload.get("conversation_history", []),
+                files_ids=request.payload.get("files_ids"),
+                jurisdiction=request.context.jurisdiction,
+                language=request.context.language,
+                include_sources=(
+                    request.options.include_sources if request.options else True
+                ),
             ):
                 yield event
         except Exception as exc:
