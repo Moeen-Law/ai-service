@@ -1,8 +1,8 @@
 """
 Files Service HTTP Adapter
 
-Production implementation for retrieving uploaded files as raw binary
-from the external Files service using file IDs.
+Production implementation for retrieving uploaded files using metadata
+endpoint + presigned download URL flow.
 """
 
 from typing import Dict, List, Optional
@@ -34,6 +34,17 @@ class HTTPFileService(ExternalFileServiceInterface):
             headers["Authorization"] = f"Bearer {self._auth_token}"
         return headers
 
+    def _build_json_headers(self) -> Dict[str, str]:
+        headers = self._build_headers()
+        headers["Accept"] = "application/json"
+        return headers
+
+    def _build_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=self._timeout,
+            verify=self._verify_tls,
+        )
+
     def _build_file_url(self, file_id: str) -> str:
         if not self._base_url:
             raise FilesServiceError(
@@ -60,42 +71,84 @@ class HTTPFileService(ExternalFileServiceInterface):
         return fallback_id
 
     async def fetch_file(self, file_id: str) -> ExternalFile:
-        """Fetch one file by ID and return raw binary content + metadata."""
-        url = self._build_file_url(file_id)
+        """Fetch one file metadata then download raw binary content."""
+        metadata_url = self._build_file_url(file_id)
 
         try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout,
-                verify=self._verify_tls,
-            ) as client:
-                response = await client.get(url, headers=self._build_headers())
+            async with self._build_client() as client:
+                metadata_response = await client.get(
+                    metadata_url,
+                    headers=self._build_json_headers(),
+                )
 
-            if response.status_code >= 400:
+                if metadata_response.status_code >= 400:
+                    raise FilesServiceError(
+                        message="Files service returned an error response",
+                        details={
+                            "file_id": file_id,
+                            "status_code": metadata_response.status_code,
+                            "url": metadata_url,
+                        },
+                    )
+
+                metadata = metadata_response.json()
+                if not isinstance(metadata, dict):
+                    raise FilesServiceError(
+                        message="Files service metadata response is invalid",
+                        details={"file_id": file_id, "url": metadata_url},
+                    )
+
+                file_status = str(metadata.get("status") or "").strip().upper()
+                if file_status and file_status != "AVAILABLE":
+                    raise FilesServiceError(
+                        message="Requested file is not available",
+                        details={
+                            "file_id": file_id,
+                            "status": file_status,
+                        },
+                    )
+
+                download_url = str(metadata.get("downloadUrl") or "").strip()
+                if not download_url:
+                    raise FilesServiceError(
+                        message="Files service did not return downloadUrl",
+                        details={"file_id": file_id, "url": metadata_url},
+                    )
+
+                download_response = await client.get(download_url)
+
+            if download_response.status_code >= 400:
                 raise FilesServiceError(
-                    message="Files service returned an error response",
+                    message="File download URL returned an error response",
                     details={
                         "file_id": file_id,
-                        "status_code": response.status_code,
+                        "status_code": download_response.status_code,
                     },
                 )
 
-            content = response.content
+            content = download_response.content
             if not content:
                 raise FilesServiceError(
                     message="Retrieved file is empty",
                     details={"file_id": file_id},
                 )
 
-            filename = self._extract_filename(
-                response.headers.get("content-disposition"),
-                fallback_id=file_id,
-            )
+            filename = str(metadata.get("originalName") or "").strip()
+            if not filename:
+                filename = self._extract_filename(
+                    download_response.headers.get("content-disposition"),
+                    fallback_id=file_id,
+                )
+
+            content_type = str(metadata.get("contentType") or "").strip() or None
+            if content_type is None:
+                content_type = download_response.headers.get("content-type")
 
             return ExternalFile(
                 file_id=file_id,
                 content=content,
                 filename=filename,
-                content_type=response.headers.get("content-type"),
+                content_type=content_type,
             )
 
         except FilesServiceError:
@@ -103,12 +156,17 @@ class HTTPFileService(ExternalFileServiceInterface):
         except httpx.TimeoutException as exc:
             raise FilesServiceError(
                 message="Files service request timed out",
-                details={"file_id": file_id, "url": url},
+                details={"file_id": file_id, "url": metadata_url},
             ) from exc
         except httpx.HTTPError as exc:
             raise FilesServiceError(
                 message="Files service HTTP request failed",
-                details={"file_id": file_id, "url": url},
+                details={"file_id": file_id, "url": metadata_url},
+            ) from exc
+        except ValueError as exc:
+            raise FilesServiceError(
+                message="Failed to parse files service response",
+                details={"file_id": file_id, "url": metadata_url},
             ) from exc
 
     async def fetch_files(self, file_ids: List[str]) -> List[ExternalFile]:
@@ -124,10 +182,7 @@ class HTTPFileService(ExternalFileServiceInterface):
             return False
 
         try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout,
-                verify=self._verify_tls,
-            ) as client:
+            async with self._build_client() as client:
                 response = await client.get(
                     self._base_url, headers=self._build_headers()
                 )

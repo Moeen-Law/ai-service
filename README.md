@@ -159,7 +159,7 @@ curl -X POST http://localhost:8000/v1/ai/tasks \
   }'
 ```
 
-`files_ids` is optional and currently supported for non-streaming `LEGAL_CHAT` requests only.
+`files_ids` is optional and supported for `LEGAL_CHAT` requests (streaming and non-streaming).
 When provided, files are fetched from the Files service, extracted (PDF/DOCX/text),
 and analyzed together with the user prompt.
 
@@ -245,9 +245,11 @@ All configuration is passed via environment variables. See [`.env.example`](.env
 | `QDRANT_URL` | Qdrant vector DB URL | `http://localhost:6333` |
 | `QDRANT_API_KEY` | Qdrant API key | — |
 | `FILES_SERVICE_BASE_URL` | Base URL for external files service | — |
-| `FILES_SERVICE_DOWNLOAD_PATH_TEMPLATE` | Download endpoint path template (supports `{file_id}`) | `/files/{file_id}` |
+| `FILES_SERVICE_DOWNLOAD_PATH_TEMPLATE` | Metadata endpoint path template (supports `{file_id}`) | `/files/api/v1/files/{file_id}` |
+| `FILES_SERVICE_UPLOAD_URL_PATH` | Upload URL endpoint path | `/files/api/v1/files/upload-url` |
 | `FILES_SERVICE_AUTH_TOKEN` | Bearer token for files service calls | — |
 | `FILES_SERVICE_TIMEOUT_SECONDS` | HTTP timeout for file fetch operations | `20` |
+| `FILES_SERVICE_UPLOAD_BUCKET` | Bucket value sent when requesting upload URL | `AI_DOCUMENTS` |
 | `FILES_MAX_COUNT` | Max uploaded files per request | `10` |
 | `FILES_MAX_SIZE_BYTES` | Max binary size per uploaded file | `8388608` |
 | `FILES_MAX_EXTRACTED_CHARS_PER_FILE` | Max extracted characters per file | `15000` |

@@ -24,6 +24,19 @@ from app.shared.errors.exceptions import (
 logger = get_logger(__name__)
 
 
+def _stringify_exception(exc: BaseException) -> str:
+    """Return a useful human-readable message for exceptions with empty str()."""
+    message = str(exc).strip()
+    if message:
+        return message
+
+    repr_value = repr(exc).strip()
+    if repr_value:
+        return repr_value
+
+    return f"{type(exc).__name__} with empty message"
+
+
 class TaskOrchestrator:
     """
     Central orchestrator for AI task execution.
@@ -160,13 +173,16 @@ class TaskOrchestrator:
             if task:
                 task.mark_failed()
 
+            error_message = _stringify_exception(e)
+
             logger.exception(
                 "Task execution failed with unexpected error",
                 task_id=str(task.task_id) if task else None,
                 error_type=type(e).__name__,
+                error_message=error_message,
             )
             raise TaskExecutionError(
-                message=f"Unexpected error during task execution: {str(e)}",
+                message=f"Unexpected error during task execution: {error_message}",
                 task_id=str(task.task_id) if task else None,
             ) from e
 
@@ -213,10 +229,22 @@ class TaskOrchestrator:
 
         except Exception as e:
             execution_time_ms = int((time.time() - start_time) * 1000)
+            cause = e.__cause__ or e.__context__
+            error_message = _stringify_exception(e)
+            details = {
+                "execution_time_ms": execution_time_ms,
+                "root_error_type": type(e).__name__,
+                "root_error_message": error_message,
+                "root_error_repr": repr(e),
+            }
+            if cause is not None:
+                details["cause_error_type"] = type(cause).__name__
+                details["cause_error_message"] = _stringify_exception(cause)
+
             raise WorkflowExecutionError(
-                message=f"Workflow execution failed: {str(e)}",
+                message=f"Workflow execution failed: {error_message}",
                 workflow_name=workflow.name,
-                details={"execution_time_ms": execution_time_ms},
+                details=details,
             ) from e
 
 

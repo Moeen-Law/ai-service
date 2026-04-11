@@ -7,6 +7,7 @@ from app.infrastructure.adapters.file_service_adapter import (
     file_service,
 )
 from app.infrastructure.adapters.file_generation_adapter import (
+    HTTPFileGenerationService,
     MockFileGenerationService,
     file_generation_service,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "HTTPFileService",
     "file_service",
     # File Generation Adapter
+    "HTTPFileGenerationService",
     "MockFileGenerationService",
     "file_generation_service",
     # LLM Adapter

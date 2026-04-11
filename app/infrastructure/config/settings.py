@@ -52,10 +52,12 @@ class Settings(BaseSettings):
 
     # --- Files Service (uploaded file retrieval) ---
     FILES_SERVICE_BASE_URL: str = ""
-    FILES_SERVICE_DOWNLOAD_PATH_TEMPLATE: str = "/files/{file_id}"
+    FILES_SERVICE_DOWNLOAD_PATH_TEMPLATE: str = "/files/api/v1/files/{file_id}"
+    FILES_SERVICE_UPLOAD_URL_PATH: str = "/files/api/v1/files/upload-url"
     FILES_SERVICE_AUTH_TOKEN: str = ""
     FILES_SERVICE_TIMEOUT_SECONDS: int = 20
     FILES_SERVICE_VERIFY_TLS: bool = True
+    FILES_SERVICE_UPLOAD_BUCKET: str = "AI_DOCUMENTS"
 
     # --- Uploaded file processing limits ---
     FILES_MAX_COUNT: int = 10
