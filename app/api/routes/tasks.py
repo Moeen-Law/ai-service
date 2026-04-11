@@ -105,7 +105,7 @@ async def execute_task(request: TaskRequest) -> TaskResponse:
 
     except (ContextValidationError, PayloadValidationError, ValidationError) as e:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_406_NOT_ACCEPTABLE,
             detail={
                 "code": e.code,
                 "message": e.message,
