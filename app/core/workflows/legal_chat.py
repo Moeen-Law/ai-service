@@ -321,6 +321,10 @@ class LegalChatWorkflow(BaseWorkflow):
         return None
 
     @staticmethod
+    def _iter_stream_tokens(text: str) -> List[str]:
+        return [match.group(0) for match in re.finditer(r"\S+|\s+", text or "")]
+
+    @staticmethod
     def _build_generated_filename(message: str) -> str:
         """Build a deterministic filename from prompt text and timestamp."""
         clean = re.sub(r"[^\w\s-]", "", (message or "").strip().lower())
@@ -471,9 +475,16 @@ class LegalChatWorkflow(BaseWorkflow):
             complete_answer = (resp.content or "").strip()
             if not complete_answer:
                 complete_answer = "عذرا، لم أتمكن من توليد إجابة مناسبة الآن."
-            yield f"data: {json.dumps({'type': 'token', 'content': complete_answer}, ensure_ascii=False)}\n\n"
-
             generation_payload = self._extract_generation_tool_payload(resp.metadata)
+            stream_content = complete_answer
+            if generation_payload is not None:
+                doc_content = generation_payload.get("document_content")
+                if isinstance(doc_content, str) and doc_content.strip():
+                    stream_content = doc_content
+
+            for token in self._iter_stream_tokens(stream_content):
+                yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+
             t_done = time.perf_counter()
             if generation_payload is not None:
                 frontend_sources = (
