@@ -321,6 +321,20 @@ class LegalChatWorkflow(BaseWorkflow):
         return None
 
     @staticmethod
+    def _format_sse_data(data: str) -> str:
+        return f"data: {data}\n\n"
+
+    @staticmethod
+    def _stringify_exception(exc: BaseException) -> str:
+        message = str(exc).strip()
+        if message:
+            return message
+        repr_value = repr(exc).strip()
+        if repr_value:
+            return repr_value
+        return f"{type(exc).__name__} with empty message"
+
+    @staticmethod
     def _iter_stream_tokens(text: str) -> List[str]:
         return [match.group(0) for match in re.finditer(r"\S+|\s+", text or "")]
 
@@ -483,7 +497,9 @@ class LegalChatWorkflow(BaseWorkflow):
                     stream_content = doc_content
 
             for token in self._iter_stream_tokens(stream_content):
-                yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+                yield self._format_sse_data(
+                    json.dumps({"type": "token", "content": token}, ensure_ascii=False)
+                )
 
             t_done = time.perf_counter()
             if generation_payload is not None:
@@ -504,7 +520,9 @@ class LegalChatWorkflow(BaseWorkflow):
                         "size_bytes": generation_payload.get("size_bytes"),
                     },
                 }
-                yield f"data: {json.dumps(generation_event, ensure_ascii=False)}\n\n"
+                yield self._format_sse_data(
+                    json.dumps(generation_event, ensure_ascii=False)
+                )
                 intent_value = "document_generation"
             else:
                 cited = self._pipeline.filter_cited_sources(
@@ -518,13 +536,33 @@ class LegalChatWorkflow(BaseWorkflow):
                 "total_ms": round((t_done - t_start) * 1000, 1),
             }
 
-            yield f"data: {json.dumps({'type': 'sources', 'sources': frontend_sources, 'timing': timing, 'intent': intent_value}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
+            yield self._format_sse_data(
+                json.dumps(
+                    {
+                        "type": "sources",
+                        "sources": frontend_sources,
+                        "timing": timing,
+                        "intent": intent_value,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            yield self._format_sse_data("[DONE]")
 
         except Exception as exc:
-            logger.error("stream_error", error=str(exc))
-            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
+            error_message = self._stringify_exception(exc)
+            logger.error(
+                "stream_error",
+                error=error_message,
+                error_type=type(exc).__name__,
+            )
+            yield self._format_sse_data(
+                json.dumps(
+                    {"type": "error", "content": error_message},
+                    ensure_ascii=False,
+                )
+            )
+            yield self._format_sse_data("[DONE]")
 
     def _is_social_only_message(self, message: str) -> bool:
         """Legacy fallback pattern matching."""

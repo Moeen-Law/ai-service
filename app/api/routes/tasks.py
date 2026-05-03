@@ -157,13 +157,27 @@ async def stream_task(request: TaskRequest) -> StreamingResponse:
 
     workflow: LegalChatWorkflow = workflow_registry.get(TaskType.LEGAL_CHAT)  # type: ignore[assignment]
 
+    def _stringify_exception(exc: BaseException) -> str:
+        message = str(exc).strip()
+        if message:
+            return message
+        repr_value = repr(exc).strip()
+        if repr_value:
+            return repr_value
+        return f"{type(exc).__name__} with empty message"
+
     async def _event_generator():
         try:
+            payload = request.payload or {}
+            files_ids = payload.get("files_ids")
+            if files_ids is None:
+                files_ids = payload.get("file_ids")
+
             async for event in workflow.stream(
-                question=request.payload.get("message", ""),
-                retrieval_k=request.payload.get("retrieval_k", 4),
-                conversation_history=request.payload.get("conversation_history", []),
-                files_ids=request.payload.get("files_ids"),
+                question=payload.get("message", ""),
+                retrieval_k=payload.get("retrieval_k", 4),
+                conversation_history=payload.get("conversation_history", []),
+                files_ids=files_ids,
                 jurisdiction=request.context.jurisdiction,
                 language=request.context.language,
                 include_sources=(
@@ -172,7 +186,10 @@ async def stream_task(request: TaskRequest) -> StreamingResponse:
             ):
                 yield event
         except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)}, ensure_ascii=False)}\n\n"
+            error_message = _stringify_exception(exc)
+            yield (
+                f"data: {json.dumps({'type': 'error', 'content': error_message}, ensure_ascii=False)}\n\n"
+            )
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(

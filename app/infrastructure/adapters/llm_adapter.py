@@ -24,6 +24,22 @@ from app.interfaces.ai.llm_service import (
 logger = get_logger(__name__)
 
 
+def _coerce_to_text(content: Any) -> str:
+    if isinstance(content, list):
+        return "".join(_coerce_to_text(item) for item in content)
+    if isinstance(content, dict):
+        if isinstance(content.get("text"), str):
+            return content["text"]
+        if isinstance(content.get("content"), str):
+            return content["content"]
+        return json.dumps(content, ensure_ascii=False)
+    if hasattr(content, "text") and isinstance(getattr(content, "text"), str):
+        return getattr(content, "text")
+    if isinstance(content, str):
+        return content
+    return str(content)
+
+
 class GeminiLLMService(LLMServiceInterface):
     """
     LLM service backed by Google Gemini (via ``langchain-google-genai``).
@@ -62,12 +78,7 @@ class GeminiLLMService(LLMServiceInterface):
                 )
 
                 content = result.content if hasattr(result, "content") else str(result)
-
-                # Ensure content is a string (Gemini may return list chunks)
-                if isinstance(content, list):
-                    content = "".join(str(item) for item in content)
-                elif not isinstance(content, str):
-                    content = str(content)
+                content = _coerce_to_text(content)
 
                 return LLMResponse(
                     content=content,
@@ -161,10 +172,7 @@ class GeminiLLMService(LLMServiceInterface):
             tool_calls = getattr(ai_msg, "tool_calls", None) or []
             if not tool_calls:
                 content = ai_msg.content if hasattr(ai_msg, "content") else str(ai_msg)
-                if isinstance(content, list):
-                    content = "".join(str(item) for item in content)
-                elif not isinstance(content, str):
-                    content = str(content)
+                content = _coerce_to_text(content)
 
                 return LLMResponse(
                     content=content,
