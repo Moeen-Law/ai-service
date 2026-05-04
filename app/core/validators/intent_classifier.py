@@ -7,6 +7,7 @@ Also extracts domain and keywords for legal queries in a single LLM call.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -40,6 +41,9 @@ class IntentClassificationResult:
     domain: Optional[str] = None
     keywords: list = field(default_factory=list)
     likely_articles: list = field(default_factory=list)
+
+
+IntentResult = IntentClassificationResult
 
 
 class IntentClassifier:
@@ -111,6 +115,7 @@ class IntentClassifier:
 - كن حذراً من أسئلة "العمل" (labor) vs "المدني" (civil)
 - لا تخترع مواد إذا لم تكن متأكداً - أرجع empty array"""
 
+
     def __init__(self, llm_service: LLMServiceInterface) -> None:
         """
         Initialize the intent classifier.
@@ -133,49 +138,47 @@ class IntentClassifier:
         Raises:
             ValueError: If LLM response is invalid or unparseable
         """
-        logger.debug(f"Classifying intent for message: {message[:100]}...")
+        logger.debug("classifying_intent", message_preview=message[:100])
 
         prompt = self._build_classification_prompt(message)
         request = LLMRequest(
             prompt=prompt,
+            system_prompt=self._SYSTEM_PROMPT,
             temperature=0.2,  # Low temperature for consistent classification
         )
 
         try:
             response = await self._llm_service.generate(request)
             result = self._parse_classification_response(response.content)
-            logger.debug(f"Classified as: {result.intent.value} (confidence: {result.confidence})")
+            logger.debug(
+                "classified",
+                intent=result.intent.value,
+                confidence=result.confidence,
+            )
             return result
-        except Exception as e:
-            logger.error(f"Intent classification failed: {e}")
+        except ValueError as e:
+            logger.warning("classification_parse_failed", error=str(e))
             # Graceful fallback: treat as vague if classification fails
             return IntentClassificationResult(
                 intent=Intent.VAGUE,
                 confidence=0.5,
                 reasoning="فشل التصنيف - تم افتراض سؤال غير واضح",
             )
+        except Exception as e:
+            logger.error("classification_failed", error=str(e))
+            raise
 
     def _build_classification_prompt(self, message: str) -> str:
         """
-        Build the prompt for classification + rewriting.
+        Build the classification prompt from the system instructions and user message.
 
         Args:
             message: The user message to classify
 
         Returns:
-            Complete prompt including system context and user message
+            User message prompt for classification.
         """
-        return f"""{self._SYSTEM_PROMPT}
-
----
-الرسالة المراد تصنيفها وتحليلها:
-\"{message}\"
----
-
-ملاحظة مهمة: إذا كان الـ intent = legal_query، يجب أن ترجع JSON يتضمن domain و keywords و likely_articles.
-للمقاصد الأخرى (chitchat, vague, out_of_scope) لا تضمّن domain/keywords.
-
-استجابتك (JSON فقط):"""
+        return f'الرسالة المراد تصنيفها:\n"{message}"\n\nاستجابتك (JSON فقط):'
 
     def _parse_classification_response(self, response_text: str) -> IntentClassificationResult:
         """
@@ -211,8 +214,14 @@ class IntentClassifier:
             intent = Intent(intent_str)
 
             # Parse other fields with defaults
-            confidence = float(data.get("confidence", 0.5))
-            confidence = max(0.0, min(1.0, confidence))  # Clamp to [0, 1]
+            raw_confidence = float(data.get("confidence", 0.5))
+            if raw_confidence < 0.0 or raw_confidence > 1.0:
+                logger.warning(
+                    "confidence_out_of_range",
+                    raw_value=raw_confidence,
+                    intent=intent_str,
+                )
+            confidence = max(0.0, min(1.0, raw_confidence))  # Clamp to [0, 1]
 
             reasoning = str(data.get("reasoning", "")).strip()
             if not reasoning:
@@ -247,6 +256,18 @@ class IntentClassifier:
                     if isinstance(likely_articles, list)
                     else []
                 )
+                original_likely_articles = likely_articles
+                likely_articles = [
+                    a for a in likely_articles if re.fullmatch(r"\d+", a)
+                ]
+                dropped_articles = sorted(
+                    set(original_likely_articles) - set(likely_articles)
+                )
+                if dropped_articles:
+                    logger.warning(
+                        "likely_articles_filtered",
+                        dropped=dropped_articles,
+                    )
 
             return IntentClassificationResult(
                 intent=intent,
@@ -258,5 +279,5 @@ class IntentClassifier:
                 likely_articles=likely_articles,
             )
         except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
-            logger.warning(f"Failed to parse classification response: {e}")
+            logger.warning("classification_response_parse_failed", error=str(e))
             raise ValueError(f"Invalid classification response format: {response_text}") from e
