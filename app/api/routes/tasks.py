@@ -17,6 +17,7 @@ from app.core.domain.enums import TaskStatus, TaskType
 from app.core.orchestrator import task_orchestrator
 from app.core.workflows.legal_chat import LegalChatWorkflow
 from app.core.workflows.registry import workflow_registry
+from app.infrastructure.logging.logger import get_logger
 from app.shared.errors.exceptions import (
     AIServiceError,
     ContextValidationError,
@@ -28,6 +29,8 @@ from app.shared.errors.exceptions import (
 
 # Import workflows to trigger registration
 import app.core.workflows  # noqa: F401
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["AI Tasks"])
 
@@ -172,6 +175,13 @@ async def stream_task(request: TaskRequest) -> StreamingResponse:
             files_ids = payload.get("files_ids")
             if files_ids is None:
                 files_ids = payload.get("file_ids")
+
+            logger.info(
+                "stream_request_received",
+                user_message=payload.get("message", ""),
+                files_ids=files_ids,
+                task_type=request.task_type.value,
+            )
 
             async for event in workflow.stream(
                 question=payload.get("message", ""),

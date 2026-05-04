@@ -158,6 +158,13 @@ class LegalChatWorkflow(BaseWorkflow):
         conversation_history = payload.get("conversation_history", [])
         files_ids = self._normalize_file_ids(payload.get("files_ids"))
 
+        if files_ids:
+            logger.info(
+                "processing_uploaded_files",
+                files_ids=files_ids,
+                files_count=len(files_ids),
+            )
+
         if files_ids and self._file_service is None:
             raise FilesServiceError(
                 message="Files service integration is not configured",
@@ -175,6 +182,13 @@ class LegalChatWorkflow(BaseWorkflow):
 
         intent_result = req.intent_result
         intent_val = intent_result.intent.value
+        
+        logger.info(
+            "intent_classification_result",
+            intent=intent_val,
+            confidence=intent_result.confidence,
+            reasoning=intent_result.reasoning,
+        )
 
         if intent_result.intent != Intent.LEGAL_QUERY:
             resp = await self._llm.generate(
@@ -428,8 +442,24 @@ class LegalChatWorkflow(BaseWorkflow):
             )
 
         try:
+            logger.debug(
+                "fetching_uploaded_files",
+                files_ids=files_ids,
+            )
             files = await self._file_service.fetch_files(files_ids)
+            
+            logger.debug(
+                "extracting_file_text",
+                files_count=len(files),
+                total_size_bytes=sum(f.size_bytes for f in files),
+            )
             extracted_files = self._file_text_extractor.extract_many(files)
+            
+            logger.info(
+                "files_processed_successfully",
+                files_count=len(extracted_files),
+                truncated_count=sum(1 for f in extracted_files if f.truncated),
+            )
         except FileExtractionError as exc:
             raise PayloadValidationError(
                 message="Unable to process one or more uploaded files",
@@ -501,6 +531,13 @@ class LegalChatWorkflow(BaseWorkflow):
         language: str = "ar",
         include_sources: bool = True,
     ) -> AsyncIterator[str]:
+        """Stream legal chat response with file processing."""
+        logger.info(
+            "legal_chat_stream_started",
+            question=question[:100],
+            files_ids=files_ids,
+            files_count=len(files_ids) if files_ids else 0,
+        )
         """
         Async generator that yields SSE-formatted events:
           - ``{type: "token", content: "..."}`` for each token
