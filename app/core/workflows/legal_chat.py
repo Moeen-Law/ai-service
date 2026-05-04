@@ -8,6 +8,7 @@ Uses intent classification, hybrid RAG retrieval, LLM query-rewriting, and SSE s
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional
 from uuid import UUID
 
@@ -16,11 +17,14 @@ from langchain_core.tools import tool
 from app.core.services.file_text_extractor import FileTextExtractor
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import Intent, TaskStatus, TaskType
-from app.core.services.query_pipeline import QueryPipeline
-from app.core.validators.intent_classifier import IntentClassifier
+from app.core.validators.intent_classifier import (
+    IntentClassificationResult,
+    IntentClassifier,
+)
+from app.core.services.query_pipeline import QueryPipeline, PipelineResult
 from app.core.workflows.base import BaseWorkflow
 from app.infrastructure.logging.logger import get_logger
-from app.interfaces.ai.llm_service import LLMServiceInterface
+from app.interfaces.ai.llm_service import LLMRequest, LLMServiceInterface
 from app.interfaces.ai.prompt_service import PromptServiceInterface
 from app.interfaces.ai.rag_service import RAGServiceInterface
 from app.interfaces.external.file_generation_service import (
@@ -36,6 +40,15 @@ from app.shared.errors.exceptions import (
 )
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class PreparedRequest:
+    intent_result: IntentClassificationResult
+    pipeline_result: Optional[PipelineResult] = None
+    assembled_prompt: Optional[str] = None
+    system_prompt: Optional[str] = None
+    tools: Optional[List[Any]] = None
 
 
 class LegalChatWorkflow(BaseWorkflow):
@@ -76,29 +89,59 @@ class LegalChatWorkflow(BaseWorkflow):
         self._file_text_extractor = file_text_extractor or FileTextExtractor()
         self._file_generation_service = file_generation_service
         self._max_sources = max_frontend_sources
-        # Keep legacy patterns as fallback
-        self._social_only_patterns = [
-            r"^\s*(شكرا|شكرًا|متشكر|تسلم|تمام|اوك|أوك|موافق|ماشي|اهلا|أهلا|سلام|باي|مع السلامة|thanks|ok)\s*[!.؟?]*\s*$",
-        ]
-        self._legal_cue_patterns = [
-            r"قانون",
-            r"مادة",
-            r"مواد",
-            r"عقوبة",
-            r"جريمة",
-            r"دعوى",
-            r"محكمة",
-            r"عقد",
-            r"طلاق",
-            r"نفقة",
-            r"ميراث",
-            r"جنحة",
-            r"جناية",
-        ]
 
     @property
     def name(self) -> str:
         return "LegalChatWorkflow"
+
+    async def _build_llm_request(
+        self,
+        question: str,
+        retrieval_k: int,
+        conversation_history: Any,
+        files_ids: List[str],
+        jurisdiction: str,
+        language: str,
+    ) -> PreparedRequest:
+        intent_result = await self._intent_classifier.classify(question)
+        if intent_result.intent != Intent.LEGAL_QUERY:
+            return PreparedRequest(intent_result=intent_result)
+
+        pipeline_result = await self._pipeline.run(
+            question=question,
+            retrieval_k=retrieval_k,
+            precomputed_domain=intent_result.domain,
+            precomputed_keywords=intent_result.keywords,
+            precomputed_articles=intent_result.likely_articles,
+            skip_rewrite=True,
+        )
+
+        template = await self._prompt.get_template(
+            task_type="LEGAL_CHAT",
+            jurisdiction=jurisdiction,
+            language=language,
+        )
+        assembled = await self._prompt.assemble_prompt(
+            template=template,
+            variables={
+                "question": question,
+                "context": pipeline_result.context,
+                "conversation_history": self._format_conversation_history(
+                    conversation_history
+                ),
+            },
+        )
+
+        tools = self._build_agent_tools(files_ids=files_ids, source_prompt=question)
+        system_prompt = self._build_agent_system_prompt(files_ids=files_ids)
+
+        return PreparedRequest(
+            intent_result=intent_result,
+            pipeline_result=pipeline_result,
+            assembled_prompt=assembled.prompt,
+            system_prompt=system_prompt,
+            tools=tools,
+        )
 
     async def execute(
         self,
@@ -121,45 +164,57 @@ class LegalChatWorkflow(BaseWorkflow):
                 details={"field": "file_service"},
             )
 
-        pipeline_result = await self._pipeline.run(
+        req = await self._build_llm_request(
             question=message,
             retrieval_k=retrieval_k,
-        )
-
-        template = await self._prompt.get_template(
-            task_type="LEGAL_CHAT",
+            conversation_history=conversation_history,
+            files_ids=files_ids,
             jurisdiction=context.jurisdiction.value,
             language=context.language.value,
         )
-        assembled = await self._prompt.assemble_prompt(
-            template=template,
-            variables={
-                "question": message,
-                "context": pipeline_result.context,
-                "conversation_history": self._format_conversation_history(
-                    conversation_history
+
+        intent_result = req.intent_result
+        intent_val = intent_result.intent.value
+
+        if intent_result.intent != Intent.LEGAL_QUERY:
+            resp = await self._llm.generate(
+                LLMRequest(
+                    prompt=message,
+                    system_prompt=self._build_personality_system_prompt(),
+                )
+            )
+
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            return Result.success(
+                task_id=UUID(task_id),
+                task_type=TaskType.LEGAL_CHAT,
+                data={
+                    "message": resp.content,
+                    "sources": [],
+                    "intent": intent_val,
+                },
+                metadata=ResultMetadata(
+                    execution_time_ms=execution_time_ms,
+                    model_used=resp.model,
+                    tokens_used=resp.tokens_used,
                 ),
-            },
-        )
+            )
 
-        from app.interfaces.ai.llm_service import LLMRequest
-
-        tools = self._build_agent_tools(files_ids=files_ids, source_prompt=message)
         include_sources = options.include_sources if options is not None else True
 
         resp = await self._llm.generate_with_tools(
             LLMRequest(
-                prompt=assembled.prompt,
-                system_prompt=self._build_agent_system_prompt(files_ids=files_ids),
+                prompt=req.assembled_prompt,
+                system_prompt=req.system_prompt,
             ),
-            tools=tools,
+            tools=req.tools,
         )
         answer = resp.content
 
         generation_payload = self._extract_generation_tool_payload(resp.metadata)
         if generation_payload is not None:
             frontend_sources = (
-                pipeline_result.sources[: self._max_sources] if include_sources else []
+                req.pipeline_result.sources[: self._max_sources] if include_sources else []
             )
             result_data = {
                 "message": generation_payload.get("document_content") or answer,
@@ -177,12 +232,12 @@ class LegalChatWorkflow(BaseWorkflow):
                 "intent": "document_generation",
             }
         else:
-            cited = self._pipeline.filter_cited_sources(answer, pipeline_result.sources)
+            cited = self._pipeline.filter_cited_sources(answer, req.pipeline_result.sources)
             frontend_sources = cited[: self._max_sources] if include_sources else []
             result_data = {
                 "message": answer,
                 "sources": frontend_sources,
-                "intent": Intent.LEGAL_QUERY.value,
+                "intent": intent_val if not frontend_sources else Intent.LEGAL_QUERY.value,
             }
 
         execution_time_ms = int((time.time() - start_time) * 1000)
@@ -281,6 +336,19 @@ class LegalChatWorkflow(BaseWorkflow):
             tools.append(generate_docx)
 
         return tools
+
+    @staticmethod
+    def _build_personality_system_prompt() -> str:
+        return """أنت مُعين، مساعد قانوني مصري ذكي وودود.
+شخصيتك: دافئ، خفيف الظل، بتتكلم عامية مصرية طبيعية.
+أنت متخصص في القانون المصري بس — مش بتجاوب على أي حاجة برا القانون.
+
+قواعد الرد:
+- لو المستخدم بيتكلم عادي (تحية، شكر، وداع، كلام شخصي) → رد بشكل إنساني طبيعي وخليه قصير
+- لو السؤال برا نطاق القانون → ارفض بلطف ووجّهه للأسئلة القانونية
+- لو السؤال قانوني بس مش واضح → اطلب توضيح بأسلوب ودي
+- لا ترد على أي سؤال مش قانوني بمعلومات حقيقية
+- ردودك قصيرة وطبيعية — مش演طة ومش رسمية"""
 
     @staticmethod
     def _build_agent_system_prompt(files_ids: List[str]) -> str:
@@ -450,61 +518,85 @@ class LegalChatWorkflow(BaseWorkflow):
                     details={"field": "file_service"},
                 )
 
-            pipeline_result = await self._pipeline.run(
+            req = await self._build_llm_request(
                 question=question,
                 retrieval_k=retrieval_k,
+                conversation_history=conversation_history,
+                files_ids=normalized_files_ids,
+                jurisdiction=jurisdiction,
+                language=language,
             )
+
+            intent_result = req.intent_result
+            intent_val = intent_result.intent.value
+
+            if intent_result.intent != Intent.LEGAL_QUERY:
+                async for chunk in self._llm.astream(
+                    question,
+                    system_prompt=self._build_personality_system_prompt(),
+                ):
+                    if chunk:
+                        yield self._format_sse_data(
+                            json.dumps(
+                                {"type": "token", "content": chunk},
+                                ensure_ascii=False,
+                            )
+                        )
+
+                t_done = time.perf_counter()
+                timing = {
+                    "retrieval_ms": 0.0,
+                    "total_ms": round((t_done - t_start) * 1000, 1),
+                }
+
+                yield self._format_sse_data(
+                    json.dumps(
+                        {
+                            "type": "sources",
+                            "sources": [],
+                            "timing": timing,
+                            "intent": intent_val,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                yield self._format_sse_data("[DONE]")
+                return
+
+            # Pipeline was run inside _build_llm_request, so retrieval time is approx:
             t_retrieval = time.perf_counter()
 
-            template = await self._prompt.get_template(
-                "LEGAL_CHAT", jurisdiction, language
-            )
-            assembled = await self._prompt.assemble_prompt(
-                template=template,
-                variables={
-                    "question": question,
-                    "context": pipeline_result.context,
-                    "conversation_history": self._format_conversation_history(
-                        conversation_history
-                    ),
-                },
-            )
-
-            from app.interfaces.ai.llm_service import LLMRequest
-
-            tools = self._build_agent_tools(
-                files_ids=normalized_files_ids,
-                source_prompt=question,
-            )
-            resp = await self._llm.generate_with_tools(
+            complete_answer = ""
+            final_metadata = None
+            
+            async for chunk, is_final, metadata in self._llm.stream_with_tools(
                 LLMRequest(
-                    prompt=assembled.prompt,
-                    system_prompt=self._build_agent_system_prompt(
-                        files_ids=normalized_files_ids
-                    ),
+                    prompt=req.assembled_prompt,
+                    system_prompt=req.system_prompt,
                 ),
-                tools=tools,
-            )
+                tools=req.tools,
+            ):
+                if chunk:
+                    complete_answer += chunk
+                    yield self._format_sse_data(
+                        json.dumps({"type": "token", "content": chunk}, ensure_ascii=False)
+                    )
+                if is_final:
+                    final_metadata = metadata
 
-            complete_answer = (resp.content or "").strip()
+            complete_answer = complete_answer.strip()
             if not complete_answer:
                 complete_answer = "عذرا، لم أتمكن من توليد إجابة مناسبة الآن."
-            generation_payload = self._extract_generation_tool_payload(resp.metadata)
-            stream_content = complete_answer
-            if generation_payload is not None:
-                doc_content = generation_payload.get("document_content")
-                if isinstance(doc_content, str) and doc_content.strip():
-                    stream_content = doc_content
-
-            for token in self._iter_stream_tokens(stream_content):
                 yield self._format_sse_data(
-                    json.dumps({"type": "token", "content": token}, ensure_ascii=False)
+                    json.dumps({"type": "token", "content": complete_answer}, ensure_ascii=False)
                 )
+                
+            generation_payload = self._extract_generation_tool_payload(final_metadata)
 
             t_done = time.perf_counter()
             if generation_payload is not None:
                 frontend_sources = (
-                    pipeline_result.sources[: self._max_sources]
+                    req.pipeline_result.sources[: self._max_sources]
                     if include_sources
                     else []
                 )
@@ -526,10 +618,10 @@ class LegalChatWorkflow(BaseWorkflow):
                 intent_value = "document_generation"
             else:
                 cited = self._pipeline.filter_cited_sources(
-                    complete_answer, pipeline_result.sources
+                    complete_answer, req.pipeline_result.sources
                 )
                 frontend_sources = cited[: self._max_sources] if include_sources else []
-                intent_value = Intent.LEGAL_QUERY.value
+                intent_value = intent_val if not frontend_sources else Intent.LEGAL_QUERY.value
 
             timing = {
                 "retrieval_ms": round((t_retrieval - t_start) * 1000, 1),
@@ -563,40 +655,6 @@ class LegalChatWorkflow(BaseWorkflow):
                 )
             )
             yield self._format_sse_data("[DONE]")
-
-    def _is_social_only_message(self, message: str) -> bool:
-        """Legacy fallback pattern matching."""
-        text = (message or "").strip().lower()
-        if not text:
-            return False
-
-        has_legal_cue = any(
-            re.search(pattern, text) for pattern in self._legal_cue_patterns
-        )
-        if has_legal_cue:
-            return False
-
-        return any(re.match(pattern, text) for pattern in self._social_only_patterns)
-
-    def _build_chitchat_response(self, message: str) -> str:
-        """Generate a friendly response for chitchat messages."""
-        text = (message or "").strip().lower()
-        if re.search(r"شكرا|شكرًا|متشكر|thanks|تسلم", text):
-            return (
-                "العفو، تحت أمرك في أي وقت. لو حابب نكمل في أي نقطة قانونية أنا معاك."
-            )
-        if re.search(r"اهلا|أهلا", text):
-            return "أهلا بيك، منور. احكي لي سؤالك القانوني وأنا أساعدك خطوة بخطوة."
-        if re.search(r"باي|مع السلامة|سلام", text):
-            return "مع السلامة، وفي أي وقت تحتاج استشارة قانونية أنا موجود."
-        return "تمام، أنا معاك. ابعت سؤالك القانوني أو التفاصيل اللي تحب نكمل عليها."
-
-    def _build_out_of_scope_response(self) -> str:
-        """Generate a response for out-of-scope messages."""
-        return (
-            "عذراً، أنا متخصص في الاستشارات القانونية والقوانين المصرية. "
-            "لو عندك سؤال قانوني أو استفسار عن حقوقك، أنا هنا لمساعدتك."
-        )
 
     @staticmethod
     def _format_conversation_history(history: Any, limit: int = 8) -> str:
