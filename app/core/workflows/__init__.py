@@ -13,7 +13,7 @@ from app.core.workflows.registry import WorkflowRegistry, workflow_registry
 from app.infrastructure.adapters import (
     file_generation_service,
     file_service,
-    llm_service,
+    get_llm_service,
     prompt_service,
     rag_service,
 )
@@ -29,6 +29,7 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
         registry: The registry to use (defaults to global instance)
     """
     reg = registry or workflow_registry
+    llm_service = get_llm_service()
 
     # Register each workflow for its corresponding task type
     reg.register(

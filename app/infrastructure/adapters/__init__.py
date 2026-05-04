@@ -11,7 +11,7 @@ from app.infrastructure.adapters.file_generation_adapter import (
     MockFileGenerationService,
     file_generation_service,
 )
-from app.infrastructure.adapters.llm_adapter import GeminiLLMService, llm_service
+from app.infrastructure.adapters.llm_adapter import GeminiLLMService, get_llm_service
 from app.infrastructure.adapters.prompt_adapter import (
     LegalPromptService,
     prompt_service,
@@ -28,7 +28,7 @@ __all__ = [
     "file_generation_service",
     # LLM Adapter
     "GeminiLLMService",
-    "llm_service",
+    "get_llm_service",
     # RAG Adapter
     "QdrantRAGService",
     "rag_service",

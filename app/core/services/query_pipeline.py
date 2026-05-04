@@ -85,6 +85,7 @@ class QueryPipeline:
         precomputed_domain: Optional[str] = None,
         precomputed_keywords: Optional[List[str]] = None,
         precomputed_articles: Optional[List[str]] = None,
+        skip_rewrite: bool = False,
     ) -> PipelineResult:
         """
         Execute the pipeline end-to-end and return context + sources.
@@ -93,8 +94,8 @@ class QueryPipeline:
         (e.g., from IntentClassifier for efficiency).
         """
 
-        # 0. LLM query rewriting — skip if precomputed
-        if precomputed_domain is not None or precomputed_keywords:
+        # 0. LLM query rewriting — skip if precomputed or explicitly requested
+        if skip_rewrite or precomputed_domain is not None or precomputed_keywords:
             # Use precomputed rewrite data (from IntentClassifier)
             llm_domain: Optional[str] = precomputed_domain
             llm_keywords: List[str] = precomputed_keywords or []

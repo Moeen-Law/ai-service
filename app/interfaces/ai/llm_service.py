@@ -87,12 +87,13 @@ class LLMServiceInterface(ABC):
         pass
 
     @abstractmethod
-    async def astream(self, prompt: str):
+    async def astream(self, prompt: str, system_prompt: Optional[str] = None):
         """
         Stream LLM response tokens asynchronously.
 
         Args:
             prompt: The formatted prompt to send to the LLM
+            system_prompt: Optional system instructions
 
         Yields:
             String tokens as they are generated
@@ -116,6 +117,26 @@ class LLMServiceInterface(ABC):
 
         Returns:
             LLMResponse with the final assistant content
+        """
+        pass
+
+    @abstractmethod
+    def stream_with_tools(
+        self,
+        request: LLMRequest,
+        tools: Sequence[Any],
+        max_iterations: int = 6,
+    ):
+        """
+        Generate a response using model-driven tool calling, streaming the output.
+
+        Args:
+            request: The LLM request with prompt/system prompt
+            tools: A sequence of tool objects usable by the model
+            max_iterations: Maximum tool-calling loop iterations
+
+        Yields:
+            Tuple of (chunk: str, is_final: bool, metadata: Optional[Dict[str, Any]])
         """
         pass
 
