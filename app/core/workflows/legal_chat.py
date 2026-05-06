@@ -8,7 +8,7 @@ Uses intent classification, hybrid RAG retrieval, LLM query-rewriting, and SSE s
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator, Dict, List, Optional
 from uuid import UUID
 
@@ -104,6 +104,22 @@ class LegalChatWorkflow(BaseWorkflow):
         language: str,
     ) -> PreparedRequest:
         intent_result = await self._intent_classifier.classify(question)
+        if files_ids and intent_result.intent!=Intent.LEGAL_QUERY:
+            logger.info(
+                "intent_overridden_due_to_files",
+                original_intent=intent_result.intent.value,
+                files_count=len(files_ids),
+            )
+            intent_result = IntentClassificationResult(
+                intent=Intent.LEGAL_QUERY,
+                confidence=1.0,
+                domain=intent_result.domain,
+                keywords=intent_result.keywords,
+                likely_articles=intent_result.likely_articles,
+                reasoning="Overridden: uploaded files present",
+            )
+
+
         if intent_result.intent != Intent.LEGAL_QUERY:
             return PreparedRequest(intent_result=intent_result)
 
@@ -115,6 +131,13 @@ class LegalChatWorkflow(BaseWorkflow):
             precomputed_articles=intent_result.likely_articles,
             skip_rewrite=True,
         )
+
+        if files_ids and self._file_service is not None:
+            uploaded_context = await self._build_uploaded_files_context(files_ids)
+            pipeline_result = replace(
+                pipeline_result,
+                context=self._merge_contexts(pipeline_result.context, uploaded_context)
+            )
 
         template = await self._prompt.get_template(
             task_type="LEGAL_CHAT",
@@ -367,17 +390,25 @@ class LegalChatWorkflow(BaseWorkflow):
     @staticmethod
     def _build_agent_system_prompt(files_ids: List[str]) -> str:
         files_hint = ", ".join(files_ids) if files_ids else "(no uploaded files)"
+        if files_ids:
+            files_section = (
+                f"الملفات المرفوعة (File IDs): {files_hint}\n"
+                "- محتوى هذه الملفات متاح بالفعل في الـ context أمامك.\n"
+                "- لا تستدعي get_uploaded_files_content إلا إذا طلب المستخدم صراحةً "
+                "تحليل جزء محدد أو مقارنة بين ملفات.\n"
+            )
+        else:
+            files_section = "- لا توجد ملفات مرفوعة في هذا الطلب.\n"
         return (
-            "أنت مساعد قانوني محترف. اتخذ قرار استخدام الأدوات بناء على طلب المستخدم فقط.\n"
+            "أنت مساعد قانوني محترف. اتخذ قرار استخدام الأدوات بناءً على طلب المستخدم فقط.\n\n"
+            f"{files_section}\n"
             "الأدوات المتاحة:\n"
-            "1) get_uploaded_files_content: لتحليل الملفات المرفوعة.\n"
-            "2) generate_docx: لإنشاء ملف DOCX عندما يطلب المستخدم صياغة مستند.\n"
-            f"File IDs المتاحة من payload.files_ids: {files_hint}\n"
+            "1) get_uploaded_files_content: لجلب محتوى ملفات إضافية عند الحاجة.\n"
+            "2) generate_docx: لإنشاء ملف DOCX عندما يطلب المستخدم صياغة مستند.\n\n"
             "قواعد التشغيل:\n"
-            "- إذا طُلب منك تحليل ملفات مرفوعة، استخدم get_uploaded_files_content قبل الإجابة.\n"
             "- لا تخترع File IDs غير الموجودة في القائمة المتاحة.\n"
-            "- إذا طُلب إنشاء مستند، أنشئ المحتوى أولا ثم استخدم generate_docx.\n"
-            "- أعد إجابة نهائية واضحة للمستخدم بعد أي استدعاءات أدوات."
+            "- إذا طُلب إنشاء مستند، أنشئ المحتوى أولاً ثم استخدم generate_docx.\n"
+            "- أعد إجابة نهائية واضحة للمستخدم بعد أي استدعاءات أدوات.\n"
         )
 
     @staticmethod
