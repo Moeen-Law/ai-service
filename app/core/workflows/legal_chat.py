@@ -9,8 +9,10 @@ import json
 import re
 import time
 from dataclasses import dataclass, replace
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, TypedDict
 from uuid import UUID
+
+from langgraph.graph import StateGraph, START, END
 
 from langchain_core.tools import tool
 
@@ -51,6 +53,24 @@ class PreparedRequest:
     tools: Optional[List[Any]] = None
 
 
+class LegalChatState(TypedDict, total=False):
+    message: str
+    files_ids: List[str]
+    jurisdiction: str
+    language: str
+    retrieval_k: int
+    conversation_history: Any
+    include_sources: bool
+    intent_result: Optional[IntentClassificationResult]
+    pipeline_result: Optional[PipelineResult]
+    uploaded_files_context: Optional[str]
+    assembled_prompt: Optional[str]
+    system_prompt: Optional[str]
+    tools: Optional[List[Any]]
+    llm_response: Optional[Any]
+    final_output: Optional[Dict[str, Any]]
+
+
 class LegalChatWorkflow(BaseWorkflow):
     """
     Workflow for LEGAL_CHAT task type.
@@ -89,22 +109,42 @@ class LegalChatWorkflow(BaseWorkflow):
         self._file_text_extractor = file_text_extractor or FileTextExtractor()
         self._file_generation_service = file_generation_service
         self._max_sources = max_frontend_sources
+        
+        workflow = StateGraph(LegalChatState)
+        workflow.add_node("classify_intent", self.classify_intent_node)
+        workflow.add_node("fetch_files", self.fetch_files_node)
+        workflow.add_node("run_rag_pipeline", self.run_rag_pipeline_node)
+        workflow.add_node("merge_context", self.merge_context_node)
+        workflow.add_node("assemble_prompt", self.assemble_prompt_node)
+        workflow.add_node("build_tools", self.build_tools_node)
+        workflow.add_node("llm_generate", self.llm_generate_node)
+        workflow.add_node("filter_sources", self.filter_output_node)
+        workflow.add_node("generation_output", self.filter_output_node)
+        workflow.add_node("personality_response", self.personality_response_node)
+
+        workflow.add_edge(START, "classify_intent")
+        workflow.add_conditional_edges("classify_intent", self.route_by_intent)
+        workflow.add_edge("fetch_files", "run_rag_pipeline")
+        workflow.add_edge("run_rag_pipeline", "merge_context")
+        workflow.add_edge("merge_context", "assemble_prompt")
+        workflow.add_edge("assemble_prompt", "build_tools")
+        workflow.add_edge("build_tools", "llm_generate")
+        workflow.add_conditional_edges("llm_generate", self.route_output)
+        workflow.add_edge("generation_output", END)
+        workflow.add_edge("filter_sources", END)
+        workflow.add_edge("personality_response", END)
+
+        self.graph = workflow.compile()
 
     @property
     def name(self) -> str:
         return "LegalChatWorkflow"
 
-    async def _build_llm_request(
-        self,
-        question: str,
-        retrieval_k: int,
-        conversation_history: Any,
-        files_ids: List[str],
-        jurisdiction: str,
-        language: str,
-    ) -> PreparedRequest:
+    async def classify_intent_node(self, state: LegalChatState) -> Dict[str, Any]:
+        files_ids = state.get("files_ids", [])
+        question = state.get("message", "")
         intent_result = await self._intent_classifier.classify(question)
-        if files_ids and intent_result.intent!=Intent.LEGAL_QUERY:
+        if files_ids and intent_result.intent != Intent.LEGAL_QUERY:
             logger.info(
                 "intent_overridden_due_to_files",
                 original_intent=intent_result.intent.value,
@@ -118,26 +158,60 @@ class LegalChatWorkflow(BaseWorkflow):
                 likely_articles=intent_result.likely_articles,
                 reasoning="Overridden: uploaded files present",
             )
+        
+        logger.info(
+            "intent_classification_result",
+            intent=intent_result.intent.value,
+            confidence=intent_result.confidence,
+            reasoning=intent_result.reasoning,
+        )
+        return {"intent_result": intent_result}
 
+    def route_by_intent(self, state: LegalChatState) -> str:
+        intent_result = state.get("intent_result")
+        if intent_result and intent_result.intent == Intent.LEGAL_QUERY:
+            return "fetch_files"
+        return "personality_response"
 
-        if intent_result.intent != Intent.LEGAL_QUERY:
-            return PreparedRequest(intent_result=intent_result)
+    async def fetch_files_node(self, state: LegalChatState) -> Dict[str, Any]:
+        files_ids = state.get("files_ids")
+        uploaded_context = None
+        if files_ids and self._file_service is not None:
+            uploaded_context = await self._build_uploaded_files_context(files_ids)
+        return {"uploaded_files_context": uploaded_context}
 
+    async def run_rag_pipeline_node(self, state: LegalChatState) -> Dict[str, Any]:
+        question = state.get("message", "")
+        retrieval_k = state.get("retrieval_k", 4)
+        intent_result = state.get("intent_result")
+        
         pipeline_result = await self._pipeline.run(
             question=question,
             retrieval_k=retrieval_k,
-            precomputed_domain=intent_result.domain,
-            precomputed_keywords=intent_result.keywords,
-            precomputed_articles=intent_result.likely_articles,
+            precomputed_domain=intent_result.domain if intent_result else None,
+            precomputed_keywords=intent_result.keywords if intent_result else [],
+            precomputed_articles=intent_result.likely_articles if intent_result else [],
             skip_rewrite=True,
         )
+        return {"pipeline_result": pipeline_result}
 
-        if files_ids and self._file_service is not None:
-            uploaded_context = await self._build_uploaded_files_context(files_ids)
+    async def merge_context_node(self, state: LegalChatState) -> Dict[str, Any]:
+        pipeline_result = state.get("pipeline_result")
+        uploaded_context = state.get("uploaded_files_context")
+        
+        if uploaded_context and pipeline_result:
             pipeline_result = replace(
                 pipeline_result,
                 context=self._merge_contexts(pipeline_result.context, uploaded_context)
             )
+        return {"pipeline_result": pipeline_result}
+
+    async def assemble_prompt_node(self, state: LegalChatState) -> Dict[str, Any]:
+        question = state.get("message", "")
+        jurisdiction = state.get("jurisdiction", "egypt")
+        language = state.get("language", "ar")
+        pipeline_result = state.get("pipeline_result")
+        conversation_history = state.get("conversation_history", [])
 
         template = await self._prompt.get_template(
             task_type="LEGAL_CHAT",
@@ -148,23 +222,128 @@ class LegalChatWorkflow(BaseWorkflow):
             template=template,
             variables={
                 "question": question,
-                "context": pipeline_result.context,
+                "context": pipeline_result.context if pipeline_result else "",
                 "conversation_history": self._format_conversation_history(
                     conversation_history
                 ),
             },
         )
+        return {"assembled_prompt": assembled.prompt}
 
+    async def build_tools_node(self, state: LegalChatState) -> Dict[str, Any]:
+        files_ids = state.get("files_ids", [])
+        question = state.get("message", "")
+        
         tools = self._build_agent_tools(files_ids=files_ids, source_prompt=question)
         system_prompt = self._build_agent_system_prompt(files_ids=files_ids)
+        
+        return {
+            "tools": tools,
+            "system_prompt": system_prompt
+        }
 
-        return PreparedRequest(
-            intent_result=intent_result,
-            pipeline_result=pipeline_result,
-            assembled_prompt=assembled.prompt,
-            system_prompt=system_prompt,
+    async def llm_generate_node(self, state: LegalChatState) -> Dict[str, Any]:
+        assembled_prompt = state.get("assembled_prompt", "")
+        system_prompt = state.get("system_prompt", "")
+        tools = state.get("tools", [])
+        
+        complete_content = ""
+        final_meta = {}
+        
+        async for chunk, is_final, metadata in self._llm.stream_with_tools(
+            LLMRequest(
+                prompt=assembled_prompt,
+                system_prompt=system_prompt,
+            ),
             tools=tools,
-        )
+        ):
+            if chunk:
+                complete_content += chunk
+            if is_final:
+                final_meta = metadata or {}
+                
+        class _MockResp:
+            content = complete_content
+            metadata = final_meta
+            model = final_meta.get("model", "streaming")
+            tokens_used = final_meta.get("tokens_used", 0)
+
+        return {"llm_response": _MockResp()}
+
+    def route_output(self, state: LegalChatState) -> str:
+        resp = state.get("llm_response")
+        generation_payload = self._extract_generation_tool_payload(resp.metadata) if resp else None
+        if generation_payload is not None:
+            return "generation_output"
+        return "filter_sources"
+
+    async def filter_output_node(self, state: LegalChatState) -> Dict[str, Any]:
+        resp = state.get("llm_response")
+        answer = resp.content if resp else ""
+        intent_result = state.get("intent_result")
+        intent_val = intent_result.intent.value if intent_result else Intent.LEGAL_QUERY.value
+        pipeline_result = state.get("pipeline_result")
+        include_sources = state.get("include_sources", True)
+
+        generation_payload = self._extract_generation_tool_payload(resp.metadata) if resp else None
+        if generation_payload is not None:
+            frontend_sources = (
+                pipeline_result.sources[: self._max_sources] if pipeline_result and include_sources else []
+            )
+            result_data = {
+                "message": generation_payload.get("document_content") or answer,
+                "document_content": generation_payload.get("document_content") or answer,
+                "format": generation_payload.get("format", "docx"),
+                "files_ids": generation_payload.get("files_ids", []),
+                "generated_file": {
+                    "file_id": generation_payload.get("file_id"),
+                    "filename": generation_payload.get("filename"),
+                    "content_type": generation_payload.get("content_type"),
+                    "size_bytes": generation_payload.get("size_bytes"),
+                },
+                "sources": frontend_sources,
+                "intent": "document_generation",
+            }
+        else:
+            cited = self._pipeline.filter_cited_sources(answer, pipeline_result.sources) if pipeline_result else []
+            frontend_sources = cited[: self._max_sources] if include_sources else []
+            result_data = {
+                "message": answer,
+                "sources": frontend_sources,
+                "intent": intent_val if not frontend_sources else Intent.LEGAL_QUERY.value,
+            }
+
+        return {"final_output": result_data}
+
+    async def personality_response_node(self, state: LegalChatState) -> Dict[str, Any]:
+        message = state.get("message", "")
+        intent_result = state.get("intent_result")
+        intent_val = intent_result.intent.value if intent_result else Intent.CHITCHAT.value
+
+        complete_content = ""
+        async for chunk in self._llm.astream(
+            message,
+            system_prompt=self._build_personality_system_prompt(),
+        ):
+            if chunk:
+                complete_content += chunk
+
+        class _MockResp:
+            content = complete_content
+            metadata = {}
+            model = "streaming"
+            tokens_used = 0
+
+        result_data = {
+            "message": complete_content,
+            "sources": [],
+            "intent": intent_val,
+        }
+        
+        return {
+            "llm_response": _MockResp(),
+            "final_output": result_data
+        }
 
     async def execute(
         self,
@@ -194,99 +373,32 @@ class LegalChatWorkflow(BaseWorkflow):
                 details={"field": "file_service"},
             )
 
-        req = await self._build_llm_request(
-            question=message,
-            retrieval_k=retrieval_k,
-            conversation_history=conversation_history,
+        include_sources = options.include_sources if options is not None else True
+
+        state = LegalChatState(
+            message=message,
             files_ids=files_ids,
             jurisdiction=context.jurisdiction.value,
             language=context.language.value,
+            retrieval_k=retrieval_k,
+            conversation_history=conversation_history,
+            include_sources=include_sources,
         )
 
-        intent_result = req.intent_result
-        intent_val = intent_result.intent.value
-        
-        logger.info(
-            "intent_classification_result",
-            intent=intent_val,
-            confidence=intent_result.confidence,
-            reasoning=intent_result.reasoning,
-        )
-
-        if intent_result.intent != Intent.LEGAL_QUERY:
-            resp = await self._llm.generate(
-                LLMRequest(
-                    prompt=message,
-                    system_prompt=self._build_personality_system_prompt(),
-                )
-            )
-
-            execution_time_ms = int((time.time() - start_time) * 1000)
-            return Result.success(
-                task_id=UUID(task_id),
-                task_type=TaskType.LEGAL_CHAT,
-                data={
-                    "message": resp.content,
-                    "sources": [],
-                    "intent": intent_val,
-                },
-                metadata=ResultMetadata(
-                    execution_time_ms=execution_time_ms,
-                    model_used=resp.model,
-                    tokens_used=resp.tokens_used,
-                ),
-            )
-
-        include_sources = options.include_sources if options is not None else True
-
-        resp = await self._llm.generate_with_tools(
-            LLMRequest(
-                prompt=req.assembled_prompt,
-                system_prompt=req.system_prompt,
-            ),
-            tools=req.tools,
-        )
-        answer = resp.content
-
-        generation_payload = self._extract_generation_tool_payload(resp.metadata)
-        if generation_payload is not None:
-            frontend_sources = (
-                req.pipeline_result.sources[: self._max_sources] if include_sources else []
-            )
-            result_data = {
-                "message": generation_payload.get("document_content") or answer,
-                "document_content": generation_payload.get("document_content")
-                or answer,
-                "format": generation_payload.get("format", "docx"),
-                "files_ids": generation_payload.get("files_ids", []),
-                "generated_file": {
-                    "file_id": generation_payload.get("file_id"),
-                    "filename": generation_payload.get("filename"),
-                    "content_type": generation_payload.get("content_type"),
-                    "size_bytes": generation_payload.get("size_bytes"),
-                },
-                "sources": frontend_sources,
-                "intent": "document_generation",
-            }
-        else:
-            cited = self._pipeline.filter_cited_sources(answer, req.pipeline_result.sources)
-            frontend_sources = cited[: self._max_sources] if include_sources else []
-            result_data = {
-                "message": answer,
-                "sources": frontend_sources,
-                "intent": intent_val if not frontend_sources else Intent.LEGAL_QUERY.value,
-            }
+        result_state = await self.graph.ainvoke(state)
+        final_output = result_state.get("final_output", {})
+        resp = result_state.get("llm_response")
 
         execution_time_ms = int((time.time() - start_time) * 1000)
 
         return Result.success(
             task_id=UUID(task_id),
             task_type=TaskType.LEGAL_CHAT,
-            data=result_data,
+            data=final_output,
             metadata=ResultMetadata(
                 execution_time_ms=execution_time_ms,
-                model_used=resp.model,
-                tokens_used=resp.tokens_used,
+                model_used=resp.model if resp else None,
+                tokens_used=resp.tokens_used if resp else None,
             ),
         )
 
@@ -562,20 +674,13 @@ class LegalChatWorkflow(BaseWorkflow):
         language: str = "ar",
         include_sources: bool = True,
     ) -> AsyncIterator[str]:
-        """Stream legal chat response with file processing."""
+        """Stream legal chat response directly without graph overhead."""
         logger.info(
             "legal_chat_stream_started",
             question=question[:100],
             files_ids=files_ids,
             files_count=len(files_ids) if files_ids else 0,
         )
-        """
-        Async generator that yields SSE-formatted events:
-          - ``{type: "token", content: "..."}`` for each token
-          - ``{type: "sources", sources: [...], timing: {...}}`` at the end
-          - ``{type: "generation", files_ids: [...], ...}`` for generation mode
-          - ``[DONE]`` sentinel
-        """
         t_start = time.perf_counter()
         normalized_files_ids = self._normalize_file_ids(files_ids)
 
@@ -586,63 +691,97 @@ class LegalChatWorkflow(BaseWorkflow):
                     details={"field": "file_service"},
                 )
 
-            req = await self._build_llm_request(
-                question=question,
-                retrieval_k=retrieval_k,
-                conversation_history=conversation_history,
-                files_ids=normalized_files_ids,
-                jurisdiction=jurisdiction,
-                language=language,
-            )
-
-            intent_result = req.intent_result
-            intent_val = intent_result.intent.value
+            # 1) Intent classification
+            intent_result = await self._intent_classifier.classify(question)
+            if normalized_files_ids and intent_result.intent != Intent.LEGAL_QUERY:
+                intent_result = IntentClassificationResult(
+                    intent=Intent.LEGAL_QUERY,
+                    confidence=1.0,
+                    domain=intent_result.domain,
+                    keywords=intent_result.keywords,
+                    likely_articles=intent_result.likely_articles,
+                    reasoning="Overridden: uploaded files present",
+                )
 
             if intent_result.intent != Intent.LEGAL_QUERY:
-                async for chunk in self._llm.astream(
-                    question,
-                    system_prompt=self._build_personality_system_prompt(),
-                ):
+                # Direct personality response for non-legal topics
+                system_prompt = self._build_personality_system_prompt()
+                async for chunk in self._llm.astream(question, system_prompt=system_prompt):
                     if chunk:
                         yield self._format_sse_data(
-                            json.dumps(
-                                {"type": "token", "content": chunk},
-                                ensure_ascii=False,
-                            )
+                            json.dumps({"type": "token", "content": chunk}, ensure_ascii=False)
                         )
-
+                
                 t_done = time.perf_counter()
                 timing = {
-                    "retrieval_ms": 0.0,
+                    "retrieval_ms": 0,
                     "total_ms": round((t_done - t_start) * 1000, 1),
                 }
-
                 yield self._format_sse_data(
-                    json.dumps(
-                        {
-                            "type": "sources",
-                            "sources": [],
-                            "timing": timing,
-                            "intent": intent_val,
-                        },
-                        ensure_ascii=False,
-                    )
+                    json.dumps({
+                        "type": "sources",
+                        "sources": [],
+                        "timing": timing,
+                        "intent": intent_result.intent.value,
+                    }, ensure_ascii=False)
                 )
                 yield self._format_sse_data("[DONE]")
                 return
 
-            # Pipeline was run inside _build_llm_request, so retrieval time is approx:
+            # 2) Full Pipeline for LEGAL_QUERY
+            # a) File Extraction
+            uploaded_context = None
+            if normalized_files_ids:
+                uploaded_context = await self._build_uploaded_files_context(normalized_files_ids)
+
+            # b) RAG Pipeline
+            pipeline_result = await self._pipeline.run(
+                question=question,
+                retrieval_k=retrieval_k,
+                precomputed_domain=intent_result.domain,
+                precomputed_keywords=intent_result.keywords,
+                precomputed_articles=intent_result.likely_articles,
+                skip_rewrite=True,
+            )
             t_retrieval = time.perf_counter()
 
+            # c) Merge Contexts
+            merged_context = ""
+            if pipeline_result:
+                merged_context = self._merge_contexts(pipeline_result.context, uploaded_context or "")
+            else:
+                merged_context = uploaded_context or ""
+
+            # d) Assemble Prompt
+            template = await self._prompt.get_template(
+                task_type="LEGAL_CHAT",
+                jurisdiction=jurisdiction,
+                language=language,
+            )
+            assembled = await self._prompt.assemble_prompt(
+                template=template,
+                variables={
+                    "question": question,
+                    "context": merged_context,
+                    "conversation_history": self._format_conversation_history(conversation_history or []),
+                },
+            )
+
+            # e) Tools Setup
+            tools = self._build_agent_tools(files_ids=normalized_files_ids, source_prompt=question)
+            system_prompt = self._build_agent_system_prompt(files_ids=normalized_files_ids)
+
+            # f) Stream Response with tools integration
+            final_meta = {}
             complete_answer = ""
-            final_metadata = None
-            
+            generation_triggered = False
+
             async for chunk, is_final, metadata in self._llm.stream_with_tools(
                 LLMRequest(
-                    prompt=req.assembled_prompt,
-                    system_prompt=req.system_prompt,
+                    prompt=assembled.prompt,
+                    system_prompt=system_prompt,
                 ),
-                tools=req.tools,
+                tools=tools,
             ):
                 if chunk:
                     complete_answer += chunk
@@ -650,24 +789,17 @@ class LegalChatWorkflow(BaseWorkflow):
                         json.dumps({"type": "token", "content": chunk}, ensure_ascii=False)
                     )
                 if is_final:
-                    final_metadata = metadata
+                    final_meta = metadata or {}
 
-            complete_answer = complete_answer.strip()
-            if not complete_answer:
-                complete_answer = "عذرا، لم أتمكن من توليد إجابة مناسبة الآن."
-                yield self._format_sse_data(
-                    json.dumps({"type": "token", "content": complete_answer}, ensure_ascii=False)
-                )
-                
-            generation_payload = self._extract_generation_tool_payload(final_metadata)
-
+            # Parse tool response if any (document generation check)
             t_done = time.perf_counter()
+            generation_payload = self._extract_generation_tool_payload(final_meta)
+            frontend_sources = []
+            final_intent = intent_result.intent.value
+            
+            # g) Send Sources and final resolution
             if generation_payload is not None:
-                frontend_sources = (
-                    req.pipeline_result.sources[: self._max_sources]
-                    if include_sources
-                    else []
-                )
+                final_intent = "document_generation"
                 generation_event = {
                     "type": "generation",
                     "intent": "document_generation",
@@ -683,30 +815,28 @@ class LegalChatWorkflow(BaseWorkflow):
                 yield self._format_sse_data(
                     json.dumps(generation_event, ensure_ascii=False)
                 )
-                intent_value = "document_generation"
             else:
-                cited = self._pipeline.filter_cited_sources(
-                    complete_answer, req.pipeline_result.sources
-                )
-                frontend_sources = cited[: self._max_sources] if include_sources else []
-                intent_value = intent_val if not frontend_sources else Intent.LEGAL_QUERY.value
-
+                if pipeline_result and include_sources:
+                    cited = self._pipeline.filter_cited_sources(complete_answer, pipeline_result.sources)
+                    frontend_sources = cited[: self._max_sources]
+                if not frontend_sources:
+                    final_intent = Intent.LEGAL_QUERY.value # keep intent but just pass empty sources
+            
             timing = {
                 "retrieval_ms": round((t_retrieval - t_start) * 1000, 1),
                 "total_ms": round((t_done - t_start) * 1000, 1),
             }
 
             yield self._format_sse_data(
-                json.dumps(
-                    {
-                        "type": "sources",
-                        "sources": frontend_sources,
-                        "timing": timing,
-                        "intent": intent_value,
-                    },
-                    ensure_ascii=False,
-                )
+                json.dumps({
+                    "type": "sources",
+                    "sources": frontend_sources,
+                    "timing": timing,
+                    "intent": final_intent,
+                }, ensure_ascii=False)
             )
+
+            logger.info("stream_ended_successfully", final_intent=final_intent)
             yield self._format_sse_data("[DONE]")
 
         except Exception as exc:
@@ -722,6 +852,7 @@ class LegalChatWorkflow(BaseWorkflow):
                     ensure_ascii=False,
                 )
             )
+
             yield self._format_sse_data("[DONE]")
 
     @staticmethod
