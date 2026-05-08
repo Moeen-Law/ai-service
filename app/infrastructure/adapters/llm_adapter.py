@@ -256,20 +256,26 @@ class GeminiLLMService(LLMServiceInterface):
         )
 
     async def stream_with_tools(
-        self,
-        request: LLMRequest,
-        tools: Sequence[Any],
-        max_iterations: int = 6,
+            self,
+            request: LLMRequest,
+            tools: Sequence[Any],
+            max_iterations: int = 6,
     ) -> AsyncIterator[tuple[str, bool, Optional[dict[str, Any]]]]:
-        """Run a tool-calling loop and return the final assistant response as a stream."""
+        """Run a tool-calling loop and stream assistant responses in real time."""
+
         if not tools:
             async for chunk in self.astream(
-                request.prompt,
-                system_prompt=request.system_prompt,
+                    request.prompt,
+                    system_prompt=request.system_prompt,
             ):
                 yield chunk, False, None
+
             self._last_successful_generation_at = time.monotonic()
-            yield "", True, {"tool_calls_count": 0, "tool_invocations": []}
+
+            yield "", True, {
+                "tool_calls_count": 0,
+                "tool_invocations": [],
+            }
             return
 
         if max_iterations < 1:
@@ -279,65 +285,96 @@ class GeminiLLMService(LLMServiceInterface):
         tool_map = {tool.name: tool for tool in tools}
 
         messages = []
+
         if request.system_prompt:
             messages.append(SystemMessage(content=request.system_prompt))
+
         messages.append(HumanMessage(content=request.prompt))
 
         tool_calls_count = 0
         tool_invocations: list[dict[str, Any]] = []
 
         for _ in range(max_iterations):
-            async def accumulate_turn() -> tuple[Any, list[str]]:
-                full_msg = None
-                buffer: list[str] = []
 
-                async for chunk in llm_with_tools.astream(messages):
+            full_msg = None
+
+            try:
+                stream = llm_with_tools.astream(messages)
+
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            anext(stream),
+                            timeout=self._request_timeout_seconds,
+                        )
+                    except StopAsyncIteration:
+                        break
+
                     if full_msg is None:
                         full_msg = chunk
                     else:
                         full_msg += chunk
 
-                    content = chunk.content if hasattr(chunk, "content") else str(chunk)
+                    content = (
+                        chunk.content
+                        if hasattr(chunk, "content")
+                        else str(chunk)
+                    )
+
                     content = _coerce_to_text(content)
+
+                    # REAL STREAMING HERE
                     if content:
-                        buffer.append(content)
+                        yield content, False, None
+                        await asyncio.sleep(0)
 
-                return full_msg, buffer
-
-            full_msg, buffer = await asyncio.wait_for(
-                accumulate_turn(),
-                timeout=self._request_timeout_seconds,
-            )
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    f"LLM streaming exceeded timeout "
+                    f"({self._request_timeout_seconds}s)"
+                )
 
             ai_msg = full_msg
+
             if ai_msg is None:
                 ai_msg = AIMessage(content="")
 
             messages.append(ai_msg)
 
             tool_calls = getattr(ai_msg, "tool_calls", None) or []
+
+            # FINAL ANSWER (NO MORE TOOLS)
             if not tool_calls:
                 self._last_successful_generation_at = time.monotonic()
-                for content in buffer:
-                    yield content, False, None
+
                 yield "", True, {
                     "tool_calls_count": tool_calls_count,
                     "tool_invocations": tool_invocations,
                 }
+
                 return
 
+            # EXECUTE TOOL CALLS
             for idx, call in enumerate(tool_calls):
+
                 tool_name = call.get("name")
+
                 tool_obj = tool_map.get(tool_name)
+
                 if tool_obj is None:
-                    raise ValueError(f"Model requested unknown tool: {tool_name}")
+                    raise ValueError(
+                        f"Model requested unknown tool: {tool_name}"
+                    )
 
                 tool_args = call.get("args", {})
+
                 if not isinstance(tool_args, dict):
                     tool_args = {}
 
                 tool_calls_count += 1
+
                 tool_result = await tool_obj.ainvoke(tool_args)
+
                 tool_invocations.append(
                     {
                         "name": tool_name,
@@ -345,15 +382,23 @@ class GeminiLLMService(LLMServiceInterface):
                         "result": tool_result,
                     }
                 )
+
                 if isinstance(tool_result, str):
                     tool_result_text = tool_result
                 else:
                     try:
-                        tool_result_text = json.dumps(tool_result, ensure_ascii=False)
+                        tool_result_text = json.dumps(
+                            tool_result,
+                            ensure_ascii=False,
+                        )
                     except TypeError:
                         tool_result_text = str(tool_result)
 
-                call_id = call.get("id") or f"tool_call_{tool_calls_count}_{idx}"
+                call_id = (
+                        call.get("id")
+                        or f"tool_call_{tool_calls_count}_{idx}"
+                )
+
                 messages.append(
                     ToolMessage(
                         content=tool_result_text,
@@ -363,7 +408,8 @@ class GeminiLLMService(LLMServiceInterface):
                 )
 
         raise RuntimeError(
-            "Tool-calling loop exceeded max_iterations without final response"
+            "Tool-calling loop exceeded max_iterations "
+            "without final response"
         )
 
     # ------------------------------------------------------------------
