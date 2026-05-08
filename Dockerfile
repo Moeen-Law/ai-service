@@ -59,6 +59,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
+        libgomp1 \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
