@@ -185,7 +185,6 @@ class TestBusinessValidator:
             context_with_domain,  # Use context with domain
             {
                 "contract_text": "نص العقد...",
-                "analysis_type": "risk_assessment",
             },
         )
         validator.validate(task)
@@ -200,7 +199,6 @@ class TestBusinessValidator:
             base_context,
             {
                 "contract_text": "نص العقد...",
-                "analysis_type": "risk_assessment",
             },
         )
 
@@ -213,17 +211,14 @@ class TestBusinessValidator:
         self, validator: BusinessValidator, context_with_domain: Context
     ) -> None:
         """Test CONTRACT_ANALYSIS without contract_text fails."""
-        task = self._create_task(
-            TaskType.CONTRACT_ANALYSIS,
-            context_with_domain,
-            {"analysis_type": "risk_assessment"},
-        )
+        task = self._create_task(TaskType.CONTRACT_ANALYSIS, context_with_domain, {})
 
         with pytest.raises(PayloadValidationError) as exc_info:
             validator.validate(task)
 
-        assert "missing_fields" in exc_info.value.details
-        assert "contract_text" in exc_info.value.details["missing_fields"]
+        assert "Either contract_text or files_ids must be provided" in str(
+            exc_info.value
+        )
 
     # --- CONTRACT_REFRAMING Tests ---
 

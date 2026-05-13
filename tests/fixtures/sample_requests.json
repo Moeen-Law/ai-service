@@ -35,8 +35,7 @@
             "domain": "commercial"
         },
         "payload": {
-            "contract_text": "عقد توريد معدات...",
-            "analysis_type": "risk_assessment"
+            "contract_text": "عقد توريد معدات..."
         }
     }
 }

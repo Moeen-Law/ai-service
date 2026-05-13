@@ -103,21 +103,41 @@ class ContractAnalysisPayload(BaseModel):
     Payload schema for CONTRACT_ANALYSIS task type.
     """
 
-    contract_text: str = Field(
-        ...,
-        description="Contract text to analyze",
+    # For file-based contract analysis the payload mirrors `LegalChatPayload`:
+    # either provide `contract_text` or `files_ids` uploaded previously.
+    contract_text: Optional[str] = Field(
+        default=None,
+        description="Contract text to analyze (optional if files_ids provided)",
         min_length=1,
         max_length=100000,
     )
-    analysis_type: str = Field(
-        ...,
-        description="Type of analysis to perform",
-        examples=["risk_assessment", "clause_extraction", "compliance_check"],
+    files_ids: Optional[List[str]] = Field(
+        default=None,
+        description="Optional uploaded file IDs to analyze",
+        max_length=10,
     )
     focus_areas: Optional[List[str]] = Field(
         default=None,
         description="Specific areas to focus analysis on",
     )
+
+    @field_validator("files_ids")
+    @classmethod
+    def validate_files_ids(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        """Validate uploaded file IDs shape and size constraints."""
+        if value is None:
+            return value
+
+        if not isinstance(value, list):
+            raise ValueError("files_ids must be a list of file IDs")
+
+        for file_id in value:
+            if not isinstance(file_id, str) or not file_id.strip():
+                raise ValueError("files_ids must contain non-empty string IDs")
+            if len(file_id.strip()) > 128:
+                raise ValueError("file ID length must be <= 128 characters")
+
+        return value
 
     model_config = {
         "extra": "forbid",

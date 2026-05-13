@@ -76,7 +76,6 @@ def contract_analysis_task(commercial_context: Context) -> Task:
         context=commercial_context,
         payload={
             "contract_text": "نص العقد التجاري...",
-            "analysis_type": "full",
         },
         options=ExecutionOptions(),
     )

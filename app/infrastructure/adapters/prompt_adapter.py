@@ -90,14 +90,14 @@ _TEMPLATES: Dict[str, PromptTemplate] = {
             "{system_prompt}\n\n"
             "المواد القانونية ذات الصلة:\n{context}\n\n"
             "نص العقد المراد تحليله:\n{contract_text}\n\n"
-            "نوع التحليل: {analysis_type}\n\n"
+            "\n"
             "المطلوب: حلل العقد وحدد:\n"
             "1. المخاطر القانونية مع مستوى كل خطر (عالي/متوسط/منخفض)\n"
             "2. ملخص التحليل\n"
             "3. التوصيات\n\n"
             "التحليل:\n"
         ),
-        variables=["system_prompt", "context", "contract_text", "analysis_type"],
+        variables=["system_prompt", "context", "contract_text"],
         description="Contract risk analysis prompt",
     ),
     "CONTRACT_REFRAMING": PromptTemplate(

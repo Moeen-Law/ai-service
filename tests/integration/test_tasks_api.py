@@ -124,7 +124,6 @@ class TestTasksAPI:
                 },
                 "payload": {
                     "contract_text": "نص العقد التجاري...",
-                    "analysis_type": "risk_assessment",
                 },
             },
         )
@@ -147,7 +146,6 @@ class TestTasksAPI:
                 },
                 "payload": {
                     "contract_text": "نص العقد...",
-                    "analysis_type": "risk_assessment",
                 },
             },
         )

@@ -48,7 +48,9 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
     )
     reg.register(
         TaskType.CONTRACT_ANALYSIS,
-        ContractAnalysisWorkflow(rag_service, llm_service, prompt_service),
+        ContractAnalysisWorkflow(
+            rag_service, llm_service, prompt_service, file_service=file_service
+        ),
     )
     reg.register(
         TaskType.CONTRACT_REFRAMING,

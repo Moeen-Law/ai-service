@@ -57,7 +57,7 @@ class TestTaskClassifier:
             },
             payload={
                 "contract_text": "Sample contract",
-                "analysis_type": "full",
+                "contract_text": "Sample contract",
             },
         )
 

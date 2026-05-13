@@ -169,47 +169,63 @@ class DocumentGenerationPayloadValidator(PayloadValidator):
 class ContractAnalysisPayloadValidator(PayloadValidator):
     """Validator for CONTRACT_ANALYSIS task payloads."""
 
-    REQUIRED_FIELDS = ["contract_text", "analysis_type"]
     MAX_CONTRACT_LENGTH = 100000
-    SUPPORTED_ANALYSIS_TYPES = [
-        "risk_assessment",
-        "clause_extraction",
-        "compliance_check",
-        "summary",
-    ]
+    MAX_FILES_COUNT = 10
+    MAX_FILE_ID_LENGTH = 128
 
     def validate(self, payload: Dict[str, Any], context: Context) -> None:
-        """Validate CONTRACT_ANALYSIS payload."""
-        # Check required fields
-        missing_fields = [f for f in self.REQUIRED_FIELDS if f not in payload]
-        if missing_fields:
-            raise PayloadValidationError(
-                message="Missing required fields in payload",
-                task_type="CONTRACT_ANALYSIS",
-                missing_fields=missing_fields,
-            )
+        """Validate CONTRACT_ANALYSIS payload.
 
-        # Validate contract text
+        Either `contract_text` (string) must be present, or `files_ids` (list of file ids).
+        """
         contract_text = payload.get("contract_text")
-        if not contract_text or not isinstance(contract_text, str):
+        files_ids = payload.get("files_ids")
+
+        if not contract_text and not files_ids:
             raise PayloadValidationError(
-                message="contract_text must be a non-empty string",
+                message="Either contract_text or files_ids must be provided",
                 task_type="CONTRACT_ANALYSIS",
             )
 
-        if len(contract_text) > self.MAX_CONTRACT_LENGTH:
-            raise PayloadValidationError(
-                message=f"contract_text exceeds maximum length of {self.MAX_CONTRACT_LENGTH}",
-                task_type="CONTRACT_ANALYSIS",
-            )
+        if contract_text:
+            if not isinstance(contract_text, str) or not contract_text.strip():
+                raise PayloadValidationError(
+                    message="contract_text must be a non-empty string",
+                    task_type="CONTRACT_ANALYSIS",
+                )
+            if len(contract_text) > self.MAX_CONTRACT_LENGTH:
+                raise PayloadValidationError(
+                    message=(
+                        f"contract_text exceeds maximum length of {self.MAX_CONTRACT_LENGTH}"
+                    ),
+                    task_type="CONTRACT_ANALYSIS",
+                )
 
-        # Validate analysis type
-        analysis_type = payload.get("analysis_type")
-        if not analysis_type or not isinstance(analysis_type, str):
-            raise PayloadValidationError(
-                message="analysis_type must be a non-empty string",
-                task_type="CONTRACT_ANALYSIS",
-            )
+        if files_ids is not None:
+            if not isinstance(files_ids, list):
+                raise PayloadValidationError(
+                    message="files_ids must be a list",
+                    task_type="CONTRACT_ANALYSIS",
+                )
+            if len(files_ids) > self.MAX_FILES_COUNT:
+                raise PayloadValidationError(
+                    message=f"files_ids exceeds maximum length of {self.MAX_FILES_COUNT}",
+                    task_type="CONTRACT_ANALYSIS",
+                )
+            for file_id in files_ids:
+                if not isinstance(file_id, str) or not file_id.strip():
+                    raise PayloadValidationError(
+                        message="files_ids must contain non-empty strings",
+                        task_type="CONTRACT_ANALYSIS",
+                    )
+                if len(file_id.strip()) > self.MAX_FILE_ID_LENGTH:
+                    raise PayloadValidationError(
+                        message=(
+                            "files_ids contains a value exceeding maximum length "
+                            f"of {self.MAX_FILE_ID_LENGTH}"
+                        ),
+                        task_type="CONTRACT_ANALYSIS",
+                    )
 
 
 class ContractReframingPayloadValidator(PayloadValidator):
