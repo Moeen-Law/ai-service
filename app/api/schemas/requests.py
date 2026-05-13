@@ -221,3 +221,7 @@ class TaskRequest(BaseModel):
             ]
         },
     }
+
+class TerminologyRequest(BaseModel):
+    terminology: str = Field(..., max_length=200)
+    use_rag: bool = Field(default=True)
