@@ -10,13 +10,24 @@ import time
 from typing import Any, Dict, Optional
 from uuid import UUID
 
+
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import TaskType
 from app.core.workflows.base import BaseWorkflow
 from app.infrastructure.logging.logger import get_logger
 from app.interfaces.ai.llm_service import LLMRequest, LLMServiceInterface
 from app.interfaces.external.search_service import SearchServiceInterface
-from app.shared.utils.exceptions import _stringify_exception
+
+
+def _stringify_exception(exc: BaseException) -> str:
+    message = str(exc).strip()
+    if message:
+        return message
+    repr_value = repr(exc).strip()
+    if repr_value:
+        return repr_value
+    return f"{type(exc).__name__} with empty message"
+
 
 logger = get_logger(__name__)
 
@@ -180,7 +191,9 @@ class GovernmentProcessesWorkflow(BaseWorkflow):
             return Result.failure(
                 task_id=UUID(task_id) if isinstance(task_id, str) else task_id,
                 task_type=TaskType.GOVERNMENT_PROCESSES,
-                errors=[f"Failed to process government procedures: {_stringify_exception(e)}"],
+                errors=[
+                    f"Failed to process government procedures: {_stringify_exception(e)}"
+                ],
                 metadata=ResultMetadata(
                     execution_time_ms=execution_time_ms,
                     model_used="unknown",
