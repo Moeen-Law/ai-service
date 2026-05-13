@@ -316,6 +316,42 @@ class TerminologyPayloadValidator(PayloadValidator):
             )
 
 
+class GovernmentProcessesPayloadValidator(PayloadValidator):
+    """Validator for GOVERNMENT_PROCESSES task payloads."""
+
+    REQUIRED_FIELDS = ["query"]
+    MAX_QUERY_LENGTH = 500
+
+    def validate(self, payload: Dict[str, Any], context: Context) -> None:
+        """Validate GOVERNMENT_PROCESSES payload."""
+        # Check required fields
+        missing_fields = [f for f in self.REQUIRED_FIELDS if f not in payload]
+        if missing_fields:
+            raise PayloadValidationError(
+                message="Missing required fields in payload",
+                task_type="GOVERNMENT_PROCESSES",
+                missing_fields=missing_fields,
+            )
+
+        # Validate query
+        query = payload.get("query")
+        if not query or not isinstance(query, str) or not query.strip():
+            raise PayloadValidationError(
+                message="query must be a non-empty string",
+                task_type="GOVERNMENT_PROCESSES",
+            )
+
+        if len(query) > self.MAX_QUERY_LENGTH:
+            raise PayloadValidationError(
+                message=f"query exceeds maximum length of {self.MAX_QUERY_LENGTH}",
+                task_type="GOVERNMENT_PROCESSES",
+                details={
+                    "max_length": self.MAX_QUERY_LENGTH,
+                    "actual_length": len(query),
+                },
+            )
+
+
 class BusinessValidator:
     """
     Central business validation coordinator.
@@ -335,6 +371,7 @@ class BusinessValidator:
             TaskType.CONTRACT_REFRAMING: ContractReframingPayloadValidator(),
             TaskType.CASE_EVALUATION: CaseEvaluationPayloadValidator(),
             TaskType.LEGAL_TERMINOLOGY: TerminologyPayloadValidator(),
+            TaskType.GOVERNMENT_PROCESSES: GovernmentProcessesPayloadValidator(),
         }
 
     def validate(self, task: Task) -> None:

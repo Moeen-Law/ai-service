@@ -8,6 +8,7 @@ from app.core.workflows.case_evaluation import CaseEvaluationWorkflow
 from app.core.workflows.contract_analysis import ContractAnalysisWorkflow
 from app.core.workflows.contract_reframing import ContractReframingWorkflow
 from app.core.workflows.document_generation import DocumentGenerationWorkflow
+from app.core.workflows.government_processes import GovernmentProcessesWorkflow
 from app.core.workflows.legal_chat import LegalChatWorkflow
 from app.core.workflows.terminology import TerminologyWorkflow
 from app.core.workflows.registry import WorkflowRegistry, workflow_registry
@@ -15,6 +16,7 @@ from app.infrastructure.adapters import (
     file_generation_service,
     file_service,
     get_llm_service,
+    get_search_service,
     prompt_service,
     rag_service,
 )
@@ -31,6 +33,7 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
     """
     reg = registry or workflow_registry
     llm_service = get_llm_service()
+    search_service = get_search_service()
 
     # Register each workflow for its corresponding task type
     reg.register(
@@ -65,6 +68,10 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
         TaskType.LEGAL_TERMINOLOGY,
         TerminologyWorkflow(llm_service, rag_service),
     )
+    reg.register(
+        TaskType.GOVERNMENT_PROCESSES,
+        GovernmentProcessesWorkflow(search_service, llm_service),
+    )
 
 # Auto-register workflows when module is imported
 register_all_workflows()
@@ -80,4 +87,5 @@ __all__ = [
     "ContractAnalysisWorkflow",
     "ContractReframingWorkflow",
     "CaseEvaluationWorkflow",
+    "GovernmentProcessesWorkflow",
 ]
