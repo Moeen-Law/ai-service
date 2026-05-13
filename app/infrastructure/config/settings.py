@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     RETRIEVAL_K: int = 4
     MAX_FRONTEND_SOURCES: int = 7
 
+    TAVILY_API_KEY: str = ""
     @property
     def is_development(self) -> bool:
         """Check if running in development mode."""
