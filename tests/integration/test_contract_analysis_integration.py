@@ -211,5 +211,7 @@ def test_contract_analysis_post_with_files(client: TestClient) -> None:
     assert data["task_type"] == "CONTRACT_ANALYSIS"
     assert data["status"] == "success"
     # CONTRACT_ANALYSIS now returns LEGAL_CHAT-style output: a `message`
-    # string plus a `document` object containing structured fields.
-    assert data["result"]["document"]["summary"] == "ok"
+    # string plus `sources` and `intent`.
+    assert data["result"]["message"].startswith("## تحليل العقد")
+    assert data["result"]["sources"] == []
+    assert data["result"]["intent"] == "CONTRACT_ANALYSIS"

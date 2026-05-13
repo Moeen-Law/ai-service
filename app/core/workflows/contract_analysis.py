@@ -155,8 +155,6 @@ class ContractAnalysisWorkflow(BaseWorkflow):
                 "recommendations": self._extract_recommendations(answer),
             }
 
-        response_data = {**structured, "sources": frontend_sources}
-
         # Render Markdown message matching LEGAL_CHAT final output style.
         message = self._render_markdown_analysis(structured)
 
@@ -169,10 +167,6 @@ class ContractAnalysisWorkflow(BaseWorkflow):
             "sources": frontend_sources,
             "intent": TaskType.CONTRACT_ANALYSIS.value,
         }
-
-        # Also keep the structured data for downstream consumers inside
-        # a `document` key so nothing is lost.
-        final_output["document"] = response_data
 
         return Result.success(
             task_id=UUID(task_id),
