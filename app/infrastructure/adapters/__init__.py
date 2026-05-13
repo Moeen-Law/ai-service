@@ -17,6 +17,7 @@ from app.infrastructure.adapters.prompt_adapter import (
     prompt_service,
 )
 from app.infrastructure.adapters.rag_adapter import QdrantRAGService, rag_service
+from app.infrastructure.adapters.search_service import TavilySearchAdapter, get_search_service
 
 __all__ = [
     # Files Adapter
@@ -35,4 +36,7 @@ __all__ = [
     # Prompt Adapter
     "LegalPromptService",
     "prompt_service",
+    # Search Adapter
+    "TavilySearchAdapter",
+    "get_search_service",
 ]
