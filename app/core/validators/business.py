@@ -301,6 +301,21 @@ class CaseEvaluationPayloadValidator(PayloadValidator):
             )
 
 
+class TerminologyPayloadValidator(PayloadValidator):
+    def validate(self, payload: Dict[str, Any], context: Context) -> None:
+        term = payload.get("terminology")
+        if not term or not isinstance(term, str) or not term.strip():
+            raise PayloadValidationError(
+                message="terminology must be a non-empty string",
+                task_type="LEGAL_TERMINOLOGY",
+            )
+        if len(term) > 200:
+            raise PayloadValidationError(
+                message="terminology exceeds maximum length of 200",
+                task_type="LEGAL_TERMINOLOGY",
+            )
+
+
 class BusinessValidator:
     """
     Central business validation coordinator.
@@ -319,6 +334,7 @@ class BusinessValidator:
             TaskType.CONTRACT_ANALYSIS: ContractAnalysisPayloadValidator(),
             TaskType.CONTRACT_REFRAMING: ContractReframingPayloadValidator(),
             TaskType.CASE_EVALUATION: CaseEvaluationPayloadValidator(),
+            TaskType.LEGAL_TERMINOLOGY: TerminologyPayloadValidator(),
         }
 
     def validate(self, task: Task) -> None:

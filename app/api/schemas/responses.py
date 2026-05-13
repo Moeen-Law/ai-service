@@ -202,3 +202,17 @@ class TaskErrorResponse(BaseModel):
         ...,
         description="Error details",
     )
+
+class RagSourceItem(BaseModel):
+    id: str
+    title: Optional[str] = None
+    excerpt: Optional[str] = None
+    score: Optional[float] = None
+
+class TerminologyResponse(BaseModel):
+    term: str = Field(..., description="The requested terminology")
+    brief_explanation: str = Field(..., description="Brief explanation")
+    examples: List[str] = Field(..., description="Examples")
+    sources: List[RagSourceItem] = Field(default_factory=list)
+    rag_used: bool = Field(default=False)
+    raw_response: Optional[str] = Field(default=None)

@@ -9,6 +9,7 @@ from app.core.workflows.contract_analysis import ContractAnalysisWorkflow
 from app.core.workflows.contract_reframing import ContractReframingWorkflow
 from app.core.workflows.document_generation import DocumentGenerationWorkflow
 from app.core.workflows.legal_chat import LegalChatWorkflow
+from app.core.workflows.terminology import TerminologyWorkflow
 from app.core.workflows.registry import WorkflowRegistry, workflow_registry
 from app.infrastructure.adapters import (
     file_generation_service,
@@ -60,7 +61,10 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
         TaskType.CASE_EVALUATION,
         CaseEvaluationWorkflow(rag_service, llm_service, prompt_service),
     )
-
+    reg.register(
+        TaskType.LEGAL_TERMINOLOGY,
+        TerminologyWorkflow(llm_service, rag_service),
+    )
 
 # Auto-register workflows when module is imported
 register_all_workflows()
