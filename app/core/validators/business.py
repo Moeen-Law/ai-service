@@ -367,7 +367,6 @@ class BusinessValidator:
         """
         # Domain is required for certain task types
         tasks_requiring_domain = {
-            TaskType.CONTRACT_ANALYSIS,
             TaskType.CASE_EVALUATION,
         }
 
