@@ -189,11 +189,10 @@ class TestBusinessValidator:
         )
         validator.validate(task)
 
-    def test_contract_analysis_missing_domain(
+    def test_contract_analysis_without_domain_is_valid(
         self, validator: BusinessValidator, base_context: Context
     ) -> None:
-        """Test CONTRACT_ANALYSIS without domain fails validation."""
-        # base_context has no domain set
+        """Test CONTRACT_ANALYSIS accepts an optional domain."""
         task = self._create_task(
             TaskType.CONTRACT_ANALYSIS,
             base_context,
@@ -202,10 +201,7 @@ class TestBusinessValidator:
             },
         )
 
-        with pytest.raises(ContextValidationError) as exc_info:
-            validator.validate(task)
-
-        assert "domain" in str(exc_info.value).lower()
+        validator.validate(task)
 
     def test_contract_analysis_missing_text(
         self, validator: BusinessValidator, context_with_domain: Context
@@ -265,20 +261,17 @@ class TestBusinessValidator:
         )
         validator.validate(task)
 
-    def test_case_evaluation_missing_domain(
+    def test_case_evaluation_without_domain_is_valid(
         self, validator: BusinessValidator, base_context: Context
     ) -> None:
-        """Test CASE_EVALUATION without domain fails validation."""
+        """Test CASE_EVALUATION accepts an optional domain."""
         task = self._create_task(
             TaskType.CASE_EVALUATION,
             base_context,
             {"case_description": "وصف القضية..."},
         )
 
-        with pytest.raises(ContextValidationError) as exc_info:
-            validator.validate(task)
-
-        assert "domain" in str(exc_info.value).lower()
+        validator.validate(task)
 
     def test_case_evaluation_missing_description(
         self, validator: BusinessValidator, context_with_domain: Context

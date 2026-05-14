@@ -402,16 +402,9 @@ class BusinessValidator:
         Raises:
             ContextValidationError: If context validation fails
         """
-        # Domain is required for certain task types
-        tasks_requiring_domain = {
-            TaskType.CASE_EVALUATION,
-        }
-
-        if task.task_type in tasks_requiring_domain and task.context.domain is None:
-            raise ContextValidationError(
-                message=f"domain is required for {task.task_type.value} tasks",
-                field="domain",
-            )
+        # Domain is optional for all task types.
+        # Context validation is limited to the required jurisdiction/language fields.
+        return None
 
     def _validate_payload(self, task: Task) -> None:
         """

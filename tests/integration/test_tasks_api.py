@@ -133,8 +133,8 @@ class TestTasksAPI:
         assert data["task_type"] == "CONTRACT_ANALYSIS"
         assert data["status"] == "success"
 
-    def test_contract_analysis_missing_domain(self, client: TestClient) -> None:
-        """Test CONTRACT_ANALYSIS without required domain context."""
+    def test_contract_analysis_without_domain(self, client: TestClient) -> None:
+        """Test CONTRACT_ANALYSIS accepts missing domain context."""
         response = client.post(
             "/v1/ai/tasks",
             json={
@@ -150,10 +150,11 @@ class TestTasksAPI:
             },
         )
 
-        assert response.status_code == 422
+        assert response.status_code == 200
         data = response.json()
         assert "detail" in data
-        assert "domain" in data["detail"]["message"].lower()
+        assert data["task_type"] == "CONTRACT_ANALYSIS"
+        assert data["status"] == "success"
 
     # --- Validation Error Tests ---
 
