@@ -13,6 +13,7 @@ from uuid import UUID
 
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import TaskType
+from app.core.services.llm_json import extract_first_json_object
 from app.core.workflows.base import BaseWorkflow
 from app.infrastructure.logging.logger import get_logger
 from app.interfaces.ai.llm_service import LLMRequest, LLMServiceInterface
@@ -122,7 +123,8 @@ class GovernmentProcessesWorkflow(BaseWorkflow):
             extraction_prompt = self._build_extraction_prompt(query, formatted_results)
             system_prompt = (
                 "You are a legal assistant specializing in Egyptian government procedures. "
-                "Always respond with ONLY valid JSON, no markdown formatting or extra text."
+                "Always respond with ONLY valid JSON, no markdown formatting or extra text. "
+                "Ensure strings in JSON are enclosed in double quotes."
             )
 
             llm_req = LLMRequest(
@@ -279,18 +281,14 @@ class GovernmentProcessesWorkflow(BaseWorkflow):
             Parsed JSON dict or None if parsing fails
         """
         try:
-            clean_response = response.strip()
+            parsed = extract_first_json_object(response)
 
-            if clean_response.startswith("```json"):
-                clean_response = clean_response.replace("```json", "", 1)
-            if clean_response.startswith("```"):
-                clean_response = clean_response.replace("```", "", 1)
-            if clean_response.endswith("```"):
-                clean_response = clean_response[:-3]
-
-            clean_response = clean_response.strip()
-
-            parsed = json.loads(clean_response)
+            if not parsed:
+                logger.warning(
+                    "json_decode_error",
+                    response=response[:200],
+                )
+                return None
 
             required_keys = {"summary", "structured_data"}
             if not all(key in parsed for key in required_keys):
