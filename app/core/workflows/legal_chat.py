@@ -13,9 +13,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, TypedDict
 from uuid import UUID
 
 from langgraph.graph import StateGraph, START, END
-
 from langchain_core.tools import tool
-from pygments.lexer import words
 
 from app.core.services.file_text_extractor import FileTextExtractor
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
@@ -110,7 +108,7 @@ class LegalChatWorkflow(BaseWorkflow):
         self._file_text_extractor = file_text_extractor or FileTextExtractor()
         self._file_generation_service = file_generation_service
         self._max_sources = max_frontend_sources
-        
+
         workflow = StateGraph(LegalChatState)
         workflow.add_node("classify_intent", self.classify_intent_node)
         workflow.add_node("fetch_files", self.fetch_files_node)
@@ -159,7 +157,7 @@ class LegalChatWorkflow(BaseWorkflow):
                 likely_articles=intent_result.likely_articles,
                 reasoning="Overridden: uploaded files present",
             )
-        
+
         logger.info(
             "intent_classification_result",
             intent=intent_result.intent.value,
@@ -185,7 +183,7 @@ class LegalChatWorkflow(BaseWorkflow):
         question = state.get("message", "")
         retrieval_k = state.get("retrieval_k", 4)
         intent_result = state.get("intent_result")
-        
+
         pipeline_result = await self._pipeline.run(
             question=question,
             retrieval_k=retrieval_k,
@@ -199,7 +197,7 @@ class LegalChatWorkflow(BaseWorkflow):
     async def merge_context_node(self, state: LegalChatState) -> Dict[str, Any]:
         pipeline_result = state.get("pipeline_result")
         uploaded_context = state.get("uploaded_files_context")
-        
+
         if uploaded_context and pipeline_result:
             pipeline_result = replace(
                 pipeline_result,
@@ -234,10 +232,10 @@ class LegalChatWorkflow(BaseWorkflow):
     async def build_tools_node(self, state: LegalChatState) -> Dict[str, Any]:
         files_ids = state.get("files_ids", [])
         question = state.get("message", "")
-        
+
         tools = self._build_agent_tools(files_ids=files_ids, source_prompt=question)
         system_prompt = self._build_agent_system_prompt(files_ids=files_ids)
-        
+
         return {
             "tools": tools,
             "system_prompt": system_prompt
@@ -247,10 +245,10 @@ class LegalChatWorkflow(BaseWorkflow):
         assembled_prompt = state.get("assembled_prompt", "")
         system_prompt = state.get("system_prompt", "")
         tools = state.get("tools", [])
-        
+
         complete_content = ""
         final_meta = {}
-        
+
         async for chunk, is_final, metadata in self._llm.stream_with_tools(
             LLMRequest(
                 prompt=assembled_prompt,
@@ -262,7 +260,7 @@ class LegalChatWorkflow(BaseWorkflow):
                 complete_content += chunk
             if is_final:
                 final_meta = metadata or {}
-                
+
         class _MockResp:
             content = complete_content
             metadata = final_meta
@@ -317,30 +315,25 @@ class LegalChatWorkflow(BaseWorkflow):
         return {"final_output": result_data}
 
     async def personality_response_node(self, state: LegalChatState) -> Dict[str, Any]:
-        message = state.get("message", "")
         intent_result = state.get("intent_result")
         intent_val = intent_result.intent.value if intent_result else Intent.CHITCHAT.value
 
-        complete_content = ""
-        async for chunk in self._llm.astream(
-            message,
-            system_prompt=self._build_personality_system_prompt(),
-        ):
-            if chunk:
-                complete_content += chunk
+        reply_text = getattr(intent_result, 'reply', None) if intent_result else None
+        if not reply_text:
+            reply_text = "أهلاً بك! أنا معين، كيف يمكنني مساعدتك في المسائل القانونية اليوم؟"
 
         class _MockResp:
-            content = complete_content
+            content = reply_text
             metadata = {}
-            model = "streaming"
+            model = "precomputed"
             tokens_used = 0
 
         result_data = {
-            "message": complete_content,
+            "message": reply_text,
             "sources": [],
             "intent": intent_val,
         }
-        
+
         return {
             "llm_response": _MockResp(),
             "final_output": result_data
@@ -488,19 +481,6 @@ class LegalChatWorkflow(BaseWorkflow):
         return tools
 
     @staticmethod
-    def _build_personality_system_prompt() -> str:
-        return """أنت مُعين، مساعد قانوني مصري ذكي وودود.
-شخصيتك: دافئ، خفيف الظل، بتتكلم عامية مصرية طبيعية.
-أنت متخصص في القانون المصري بس — مش بتجاوب على أي حاجة برا القانون.
-
-قواعد الرد:
-- لو المستخدم بيتكلم عادي (تحية، شكر، وداع، كلام شخصي) → رد بشكل إنساني طبيعي وخليه قصير
-- لو السؤال برا نطاق القانون → ارفض بلطف ووجّهه للأسئلة القانونية
-- لو السؤال قانوني بس مش واضح → اطلب توضيح بأسلوب ودي
-- لا ترد على أي سؤال مش قانوني بمعلومات حقيقية
-- ردودك قصيرة وطبيعية — مش演طة ومش رسمية"""
-
-    @staticmethod
     def _build_agent_system_prompt(files_ids: List[str]) -> str:
         files_hint = ", ".join(files_ids) if files_ids else "(no uploaded files)"
         if files_ids:
@@ -511,7 +491,7 @@ class LegalChatWorkflow(BaseWorkflow):
                 "تحليل جزء محدد أو مقارنة بين ملفات.\n"
             )
         else:
-            files_section = "- لا توجد ملفات مرفوعة في هذا الطلب.\n"
+            files_section = "- لا توجد ملفات مرفوعة in هذا الطلب.\n"
         return (
             "أنت مساعد قانوني محترف. اتخذ قرار استخدام الأدوات بناءً على طلب المستخدم فقط.\n\n"
             f"{files_section}\n"
@@ -561,10 +541,6 @@ class LegalChatWorkflow(BaseWorkflow):
         return f"{type(exc).__name__} with empty message"
 
     @staticmethod
-    def _iter_stream_tokens(text: str) -> List[str]:
-        return [match.group(0) for match in re.finditer(r"\S+|\s+", text or "")]
-
-    @staticmethod
     def _build_generated_filename(message: str) -> str:
         """Build a deterministic filename from prompt text and timestamp."""
         clean = re.sub(r"[^\w\s-]", "", (message or "").strip().lower())
@@ -591,14 +567,14 @@ class LegalChatWorkflow(BaseWorkflow):
                 files_ids=files_ids,
             )
             files = await self._file_service.fetch_files(files_ids)
-            
+
             logger.debug(
                 "extracting_file_text",
                 files_count=len(files),
                 total_size_bytes=sum(f.size_bytes for f in files),
             )
             extracted_files = self._file_text_extractor.extract_many(files)
-            
+
             logger.info(
                 "files_processed_successfully",
                 files_count=len(extracted_files),
@@ -694,7 +670,7 @@ class LegalChatWorkflow(BaseWorkflow):
 
             # 1) Intent classification
             intent_result = await self._intent_classifier.classify(question)
-            print(f"Intent classification result: {intent_result.intent.value} (confidence: {intent_result.confidence}, reasoning: {intent_result.reasoning})")
+            logger.info(f"Intent classification result: {intent_result.intent.value} (confidence: {intent_result.confidence}, reasoning: {intent_result.reasoning})")
             if normalized_files_ids and intent_result.intent != Intent.LEGAL_QUERY:
                 intent_result = IntentClassificationResult(
                     intent=Intent.LEGAL_QUERY,
@@ -706,29 +682,39 @@ class LegalChatWorkflow(BaseWorkflow):
                 )
 
             if intent_result.intent != Intent.LEGAL_QUERY:
-              reply_text=getattr(intent_result,'reply',None)
-              if not reply_text:
-                  reply_text="أهلاً بك! أنا معين، كيف يمكنني مساعدتك في المسائل القانونية اليوم؟"
-              words = reply_text.split(" ")
-              for i , word in enumerate(words):
-                chunk=word+" " if i<len(words)-1 else word
-                yield self._format_sse_data(
-                      json.dumps({"type": "token", "content": chunk}, ensure_ascii=False)
-                )
-                await asyncio.sleep(0.02)
+                reply_text = getattr(intent_result, 'reply', None)
+                if not reply_text:
+                    reply_text = "أهلاً بك! أنا معين، كيف يمكنني مساعدتك في المسائل القانونية اليوم؟"
+
+                logger.info(f"Full LLM Reply Before Streaming: {reply_text}")
+
+                async def mock_gemini_stream(text: str):
+                    words = text.split(" ")
+                    for i, word in enumerate(words):
+                        chunk = word + " " if i < len(words) - 1 else word
+                        yield chunk
+                        await asyncio.sleep(0.05)
+
+                async_stream = mock_gemini_stream(reply_text)
+                async for chunk in async_stream:
+                    if chunk:
+                        yield self._format_sse_data(
+                            json.dumps({"type": "token", "content": chunk}, ensure_ascii=False)
+                        )
+
                 t_done = time.perf_counter()
                 timing = {
-                      "retrieval_ms": 0,
-                      "total_ms": round((t_done - t_start) * 1000, 1),
-                  }
+                    "retrieval_ms": 0,
+                    "total_ms": round((t_done - t_start) * 1000, 1),
+                }
                 yield self._format_sse_data(
-                      json.dumps({
-                          "type": "sources",
-                          "sources": [],
-                          "timing": timing,
-                          "intent": intent_result.intent.value,
-                      }, ensure_ascii=False)
-                  )
+                    json.dumps({
+                        "type": "sources",
+                        "sources": [],
+                        "timing": timing,
+                        "intent": intent_result.intent.value,
+                    }, ensure_ascii=False)
+                )
                 yield self._format_sse_data("[DONE]")
                 return
 
@@ -778,7 +764,6 @@ class LegalChatWorkflow(BaseWorkflow):
             # f) Stream Response with tools integration
             final_meta = {}
             complete_answer = ""
-            generation_triggered = False
 
             async for chunk, is_final, metadata in self._llm.stream_with_tools(
                 LLMRequest(
@@ -824,7 +809,7 @@ class LegalChatWorkflow(BaseWorkflow):
                     cited = self._pipeline.filter_cited_sources(complete_answer, pipeline_result.sources)
                     frontend_sources = cited[: self._max_sources]
                 if not frontend_sources:
-                    final_intent = Intent.LEGAL_QUERY.value # keep intent but just pass empty sources
+                    final_intent = Intent.LEGAL_QUERY.value
 
             timing = {
                 "retrieval_ms": round((t_retrieval - t_start) * 1000, 1),
@@ -856,7 +841,6 @@ class LegalChatWorkflow(BaseWorkflow):
                     ensure_ascii=False,
                 )
             )
-
             yield self._format_sse_data("[DONE]")
 
     @staticmethod
