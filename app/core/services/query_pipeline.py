@@ -338,7 +338,7 @@ class QueryPipeline:
                     existing_keys.add(key)
                     injected += 1
         if injected:
-            logger.info("injected_question_articles", count=injected)
+            logger.debug("injected_question_articles", count=injected)
         return new_docs
 
     @staticmethod
@@ -420,7 +420,7 @@ class QueryPipeline:
                     existing_keys.add(key)
                     added += 1
         if added:
-            logger.info("cross_ref_injected", count=added)
+            logger.debug("cross_ref_injected", count=added)
         return new_docs
 
     @staticmethod
