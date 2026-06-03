@@ -6,6 +6,7 @@ with hybrid retrieval (vector + BM25) and cross-domain article caching.
 """
 
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -141,6 +142,7 @@ class QdrantRAGService(RAGServiceInterface):
         k: int = 15,
     ) -> List[Document]:
         fetch_k = max(k * 3, 15)
+        start_time=time.time()
 
         vector_results = self._vector_search(clean_query, k=fetch_k)
         bm25_results = self._bm25_search(expanded_query, k=fetch_k)
@@ -150,16 +152,17 @@ class QdrantRAGService(RAGServiceInterface):
             vector=len(vector_results),
             bm25=len(bm25_results),
         )
-
+        rrf_start=time.time()
         merged = self._rrf_merge(
             [vector_results, bm25_results],
             weights=[self._vector_weight, self._bm25_weight],
         )
-
+        logger.debug(f"_rrf_merge took {time.time() - rrf_start:.4f} seconds")
         docs: List[Document] = []
         for rank, lc_doc in enumerate(merged):
             score = 1.0 / (60 + rank + 1)
             docs.append(_lc_to_domain(lc_doc, score=score))
+        logger.debug(f"Total hybrid_retrieve took {time.time() - start_time:.4f} seconds")
         return docs
 
     # ------------------------------------------------------------------

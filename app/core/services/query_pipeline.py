@@ -19,6 +19,7 @@ Pipeline steps (mirroring the original preprocessing ``app.py``):
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
@@ -93,8 +94,9 @@ class QueryPipeline:
         Can optionally skip LLM query rewriting if results are already computed
         (e.g., from IntentClassifier for efficiency).
         """
-
+        pipeline_start = time.time()
         # 0. LLM query rewriting — skip if precomputed or explicitly requested
+        rewrite_start = time.time()
         if skip_rewrite or precomputed_domain is not None or precomputed_keywords:
             # Use precomputed rewrite data (from IntentClassifier)
             llm_domain: Optional[str] = precomputed_domain
@@ -112,17 +114,18 @@ class QueryPipeline:
             llm_domain: Optional[str] = rewrite.get("domain")
             llm_keywords: List[str] = rewrite.get("keywords", [])
             llm_articles: List[str] = rewrite.get("likely_articles", [])
-
+        logger.info(f"[Pipeline TIME] Step 0 (LLM Rewrite) took {time.time() - rewrite_start:.4f} seconds")
         expanded_query = " ".join(llm_keywords) if llm_keywords else question
 
         # 1. Domain detection
+        domain_start = time.time()
         if llm_domain:
             preferred_domain = llm_domain
         else:
             preferred_domain = self._rag.detect_domain_semantic(question)
 
         logger.info("pipeline_domain", domain=preferred_domain)
-
+        logger.info(f"[Pipeline TIME] Step 1 (Domain Detection) took {time.time() - domain_start:.4f} seconds")
         # 1b. Merge article numbers
         question_numbers = extract_article_numbers_from_text(question)
         for art in llm_articles:
@@ -131,10 +134,12 @@ class QueryPipeline:
                 question_numbers.append(art)
 
         # 2. Article-only shortcut
+        retrieval_start = time.time()
         stripped = re.sub(r"[^\d\s]", "", question).strip()
         is_article_only = bool(stripped and stripped.isdigit())
 
         if is_article_only and question_numbers:
+            logger.info("[Pipeline] Triggering Article-only lookup shortcut.")
             retrieved_docs = self._article_only_lookup(question_numbers)
         else:
             # 2b. Full hybrid retrieval
@@ -144,29 +149,36 @@ class QueryPipeline:
                 domain=preferred_domain,
                 k=max(retrieval_k * 3, 15),
             )
-
+        logger.info(
+                f"[Pipeline TIME] Step 2 (Retrieval) took {time.time() - retrieval_start:.4f} seconds (Fetched {len(retrieved_docs)} docs)")
         # 3. Inject articles mentioned in question from cache
+        inject_q_start = time.time()
         retrieved_docs = self._inject_question_articles(
             retrieved_docs,
             question_numbers,
             preferred_domain,
         )
-
+        logger.info(
+            f"[Pipeline TIME] Step 3 (Inject Question Articles) took {time.time() - inject_q_start:.4f} seconds")
         # 4. Rerank by article-number match
+        rerank_start = time.time()
         if question_numbers:
             retrieved_docs = self._rerank_by_article_match(
                 retrieved_docs,
                 question_numbers,
             )
-
+        logger.info(f"[Pipeline TIME] Step 4 (Rerank by Article Match) took {time.time() - rerank_start:.4f} seconds")
         # 5. Domain-priority filtering
+        priority_start = time.time()
         retrieved_docs = self._domain_priority_filter(
             retrieved_docs,
             preferred_domain,
             retrieval_k,
         )
-
+        logger.info(f"[Pipeline TIME] Step 5 (Domain Priority Filter) took {time.time() - priority_start:.4f} seconds")
         if not retrieved_docs:
+            logger.info(
+                f"[Pipeline TIME] TOTAL PIPELINE RUN TIME (Empty Docs): {time.time() - pipeline_start:.4f} seconds")
             return PipelineResult(
                 context="",
                 sources=[],
@@ -175,14 +187,24 @@ class QueryPipeline:
             )
 
         # 6. Cross-reference injection
+        cross_ref_start = time.time()
         retrieved_docs = self._inject_cross_references(
             retrieved_docs,
             preferred_domain,
         )
+        logger.info(
+            f"[Pipeline TIME] Step 6 (Cross-Reference Injection) took {time.time() - cross_ref_start:.4f} seconds")
 
+        max_allowed_docs = 7
+        if len(retrieved_docs) > max_allowed_docs:
+            logger.info(
+                f"[Pipeline] Trimming final docs from {len(retrieved_docs)} to {max_allowed_docs} for LLM efficiency.")
+            retrieved_docs = retrieved_docs[:max_allowed_docs]
         # 7. Build context + sources
+        build_ctx_start = time.time()
         context, sources = self._build_context_and_sources(retrieved_docs)
-
+        logger.info(
+            f"[Pipeline TIME] Step 7 (Build Context and Sources) took {time.time() - build_ctx_start:.4f} seconds")
         return PipelineResult(
             context=context,
             sources=sources,
@@ -196,12 +218,15 @@ class QueryPipeline:
         sources: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """Return only sources whose article_number appears in the LLM answer."""
+        filter_start = time.time()
         cited_nums: Set[str] = set()
         cited_nums.update(re.findall(r"الماد[ةه]\s+(\d+)", answer))
         cited_nums.update(re.findall(r"ماد[ةه]\s+(\d+)", answer))
         cited_nums.update(re.findall(r"(?:^|\s)(\d+)(?:\s|$|[،,.])", answer))
 
         if not cited_nums:
+            logger.info(
+                f"[Pipeline TIME] filter_cited_sources took {time.time() - filter_start:.4f} seconds (No citations found)")
             return sources
 
         filtered = [
@@ -210,6 +235,8 @@ class QueryPipeline:
             if str(s.get("metadata", {}).get("article_number", "")).strip()
             in cited_nums
         ]
+        logger.info(
+            f"[Pipeline TIME] filter_cited_sources took {time.time() - filter_start:.4f} seconds (Filtered from {len(sources)} to {len(filtered)} sources)")
         return filtered if filtered else sources
 
     # ==================================================================
@@ -311,7 +338,7 @@ class QueryPipeline:
                     existing_keys.add(key)
                     injected += 1
         if injected:
-            logger.debug("injected_question_articles", count=injected)
+            logger.info("injected_question_articles", count=injected)
         return new_docs
 
     @staticmethod
@@ -352,7 +379,7 @@ class QueryPipeline:
 
         combined = priority + other
         if preferred_domain and priority:
-            return combined[: max(retrieval_k * 4, 15)]
+            return combined[: retrieval_k * 2]
         return combined[: retrieval_k * 2]
 
     def _inject_cross_references(
@@ -393,7 +420,7 @@ class QueryPipeline:
                     existing_keys.add(key)
                     added += 1
         if added:
-            logger.debug("cross_ref_injected", count=added)
+            logger.info("cross_ref_injected", count=added)
         return new_docs
 
     @staticmethod

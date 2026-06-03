@@ -39,7 +39,7 @@ from app.shared.errors.exceptions import (
     FilesServiceError,
     PayloadValidationError,
 )
-
+from app.shared.utils.token_calculator import TokenCostCalculator
 logger = get_logger(__name__)
 
 
@@ -758,12 +758,18 @@ class LegalChatWorkflow(BaseWorkflow):
             )
 
             # e) Tools Setup
-            tools = self._build_agent_tools(files_ids=normalized_files_ids, source_prompt=question)
+            if normalized_files_ids:
+                tools = self._build_agent_tools(files_ids=normalized_files_ids, source_prompt=question)
+            else:
+                tools=[]
             system_prompt = self._build_agent_system_prompt(files_ids=normalized_files_ids)
 
             # f) Stream Response with tools integration
             final_meta = {}
             complete_answer = ""
+
+            llm_stream_start = time.perf_counter()
+            first_token_logged = False
 
             async for chunk, is_final, metadata in self._llm.stream_with_tools(
                 LLMRequest(
@@ -773,13 +779,27 @@ class LegalChatWorkflow(BaseWorkflow):
                 tools=tools,
             ):
                 if chunk:
+                    if not first_token_logged:
+                        logger.info(
+                            f"[LLM TIME] Time to FIRST TOKEN: {time.perf_counter() - llm_stream_start:.4f} seconds")
+                        first_token_logged = True
+
                     complete_answer += chunk
                     yield self._format_sse_data(
                         json.dumps({"type": "token", "content": chunk}, ensure_ascii=False)
                     )
                 if is_final:
                     final_meta = metadata or {}
+            logger.info(
+                    f"[LLM TIME] Total LLM Generation Time: {time.perf_counter() - llm_stream_start:.4f} seconds")
+            input_tokens = TokenCostCalculator.estimate_tokens((assembled.prompt or "") + (system_prompt or ""))
+            output_tokens = TokenCostCalculator.estimate_tokens(complete_answer)
+            cost_per_1k = TokenCostCalculator.calculate_cost_per_1k(input_tokens, output_tokens)
 
+            logger.info(
+                f"[TOKEN USAGE] Input: {input_tokens} tokens | Output: {output_tokens} tokens | Total: {input_tokens + output_tokens} tokens"
+            )
+            logger.info(f"[COST ESTIMATE - Gemini 2.5 Flash] Cost for 1,000 queries: ${cost_per_1k:.4f}")
             # Parse tool response if any (document generation check)
             t_done = time.perf_counter()
             generation_payload = self._extract_generation_tool_payload(final_meta)
