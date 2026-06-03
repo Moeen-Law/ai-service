@@ -41,7 +41,7 @@ class IntentClassificationResult:
     domain: Optional[str] = None
     keywords: list = field(default_factory=list)
     likely_articles: list = field(default_factory=list)
-
+    reply: Optional[str] = None
 
 IntentResult = IntentClassificationResult
 
@@ -59,64 +59,55 @@ class IntentClassifier:
     """
 
     # System prompt for intent classification + query rewriting (Arabic-first)
-    _SYSTEM_PROMPT = """أنت مساعد ذكي متخصص في تصنيف وتحليل الرسائل القانونية.
+    _SYSTEM_PROMPT = """
+    You are "Mueen" (معين), an intelligent and friendly Egyptian AI legal assistant. 
 
-مهمتك المربوطة:
-1. تحديد نية المستخدم من رسالته
-2. إذا كانت نية قانونية → استخراج domain والكلمات المفتاحية والمواد المتعلقة
+Your task is to analyze the user's message, determine their intent, and return a strict JSON object.
 
-التصنيفات الممكنة:
-1. **chitchat** - تحيات، شكر، أحاديث عادية (لا علاقة بالقانون)
-   أمثلة: "مرحبا"، "شكراً"، "تمام"
+# INSTRUCTIONS:
+1. Identify the intent of the message.
+2. If it is a "legal_query", extract the legal domain, keywords, and likely articles (do NOT answer the legal question).
+3. If it is "chitchat", "vague", or "out_of_scope", you MUST generate a direct response acting as Mueen in the "reply" field. The "reply" MUST be in Arabic.
 
-2. **legal_query** - سؤال قانوني واضح ومحدد عن القانون المصري
-   أمثلة: "ما حقوقي في الفصل التعسفي؟"، "هل يمكن فسخ العقد؟"، "حلل العقد المرفق"، "شوف العقود دي وقولي حقوقي"
-   → في هذه الحالة استخرج أيضاً: domain, keywords, likely_articles
+# INTENT CATEGORIES:
+1. "legal_query": Clear questions about Egyptian law, contracts, or document analysis (e.g., "ما حقوقي في الفصل التعسفي؟", "حلل هذا العقد").
+2. "chitchat": Greetings, thanks, or casual talk (e.g., "شكرا", "ازيك").
+3. "vague": A legal query that is too broad and needs clarification (e.g., "حقوقي؟", "القانون").
+4. "out_of_scope": Topics completely unrelated to law (e.g., "الطقس", "أين أكل؟").
 
-3. **vague** - سؤال قانوني لكن غير واضح أو يحتاج توضيح
-   أمثلة: "حقوقي؟"، "القانون"، "مساعدة"
-   → لا تستخرج domain/keywords - فقط اطلب توضيح
+# LEGAL DOMAINS (Use ONLY these):
+["penal", "civil", "labor", "constitution", "commercial", "criminal_procedure"]
 
-4. **out_of_scope** - موضوع غير قانوني تماماً
-   أمثلة: "أين أشتري بيتزا؟"، "الطقس اليوم"
-   → رفض لطيف و redirect للقانون
+# EXPECTED JSON SCHEMA:
 
-استخدم الـ LEGAL_DOMAINS المتاحة:
-- penal (جنائي)
-- civil (مدني)
-- labor (عمل)
-- constitution (دستوري)
-- commercial (تجاري)
-- criminal_procedure (إجراءات جنائية)
-
-استجابتك يجب أن تكون JSON بهذا الشكل:
-
-للـ LEGAL_QUERY:
+For "legal_query":
 {
     "intent": "legal_query",
     "confidence": 0.95,
-    "reasoning": "السؤال يتعلق بحقوق العمل",
+    "reasoning": "Brief explanation in English",
     "domain": "labor",
-    "keywords": ["فصل", "تعسفي", "عمل"],
-    "likely_articles": ["206", "207"]
+    "keywords": ["فصل", "تعسفي", "حقوق"],
+    "likely_articles": ["206", "207"],
+    "reply": null
 }
 
-للـ CHITCHAT/VAGUE/OUT_OF_SCOPE:
+For "chitchat", "vague", or "out_of_scope":
 {
-    "intent": "chitchat|vague|out_of_scope",
-    "confidence": 0.9,
-    "reasoning": "شرح مختصر",
-    "suggested_clarification": "null أو سؤال توضيحي"
+    "intent": "chitchat | vague | out_of_scope",
+    "confidence": 0.90,
+    "reasoning": "Brief explanation in English",
+    "domain": null,
+    "keywords": [],
+    "likely_articles": [],
+    "reply": "Your intelligent, helpful response in ARABIC here, acting as Mueen."
 }
 
-تنبيهات:
-- لا تحاول الإجابة على السؤال، فقط حللّه
-- استخرج domain و keywords فقط لـ legal_query
-- كن حذراً من أسئلة "العمل" (labor) vs "المدني" (civil)
-- لا تخترع مواد إذا لم تكن متأكداً - أرجع empty array
-- أسئلة تحليل العقود والمستندات المرفقة تعتبر legal_query حتى لو كانت غير محددة تماماً
-- أي طلب لتحليل أو مراجعة مستندات/عقود/اتفاقيات = legal_query"""
-
+# CRITICAL RULES:
+- The "reply" field MUST ALWAYS BE IN ARABIC.
+- Do NOT make up laws or articles. If unsure, return an empty array [].
+- Requests to analyze attached documents ALWAYS count as "legal_query".
+- Output ONLY valid JSON, without any markdown formatting like ```json.
+    """
 
     def __init__(self, llm_service: LLMServiceInterface) -> None:
         """
@@ -235,6 +226,11 @@ class IntentClassifier:
             else:
                 clarification = str(clarification).strip()
 
+            reply = data.get("reply")
+            if reply == "null" or not reply:
+                reply = None
+            else:
+                reply = str(reply).strip()
             # Parse rewrite data (only for legal_query)
             domain = None
             keywords = []
@@ -279,6 +275,8 @@ class IntentClassifier:
                 domain=domain,
                 keywords=keywords,
                 likely_articles=likely_articles,
+                reply=reply,
+
             )
         except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
             logger.warning("classification_response_parse_failed", error=str(e))
