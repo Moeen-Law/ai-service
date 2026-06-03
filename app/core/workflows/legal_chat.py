@@ -4,7 +4,7 @@ Legal Chat Workflow
 Full-pipeline workflow for conversational legal queries.
 Uses intent classification, hybrid RAG retrieval, LLM query-rewriting, and SSE streaming.
 """
-
+import asyncio
 import json
 import re
 import time
@@ -15,6 +15,7 @@ from uuid import UUID
 from langgraph.graph import StateGraph, START, END
 
 from langchain_core.tools import tool
+from pygments.lexer import words
 
 from app.core.services.file_text_extractor import FileTextExtractor
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
@@ -693,6 +694,7 @@ class LegalChatWorkflow(BaseWorkflow):
 
             # 1) Intent classification
             intent_result = await self._intent_classifier.classify(question)
+            print(f"Intent classification result: {intent_result.intent.value} (confidence: {intent_result.confidence}, reasoning: {intent_result.reasoning})")
             if normalized_files_ids and intent_result.intent != Intent.LEGAL_QUERY:
                 intent_result = IntentClassificationResult(
                     intent=Intent.LEGAL_QUERY,
@@ -704,27 +706,29 @@ class LegalChatWorkflow(BaseWorkflow):
                 )
 
             if intent_result.intent != Intent.LEGAL_QUERY:
-                # Direct personality response for non-legal topics
-                system_prompt = self._build_personality_system_prompt()
-                async for chunk in self._llm.astream(question, system_prompt=system_prompt):
-                    if chunk:
-                        yield self._format_sse_data(
-                            json.dumps({"type": "token", "content": chunk}, ensure_ascii=False)
-                        )
-                
+              reply_text=getattr(intent_result,'reply',None)
+              if not reply_text:
+                  reply_text="أهلاً بك! أنا معين، كيف يمكنني مساعدتك في المسائل القانونية اليوم؟"
+              words = reply_text.split(" ")
+              for i , word in enumerate(words):
+                chunk=word+" " if i<len(words)-1 else word
+                yield self._format_sse_data(
+                      json.dumps({"type": "token", "content": chunk}, ensure_ascii=False)
+                )
+                await asyncio.sleep(0.02)
                 t_done = time.perf_counter()
                 timing = {
-                    "retrieval_ms": 0,
-                    "total_ms": round((t_done - t_start) * 1000, 1),
-                }
+                      "retrieval_ms": 0,
+                      "total_ms": round((t_done - t_start) * 1000, 1),
+                  }
                 yield self._format_sse_data(
-                    json.dumps({
-                        "type": "sources",
-                        "sources": [],
-                        "timing": timing,
-                        "intent": intent_result.intent.value,
-                    }, ensure_ascii=False)
-                )
+                      json.dumps({
+                          "type": "sources",
+                          "sources": [],
+                          "timing": timing,
+                          "intent": intent_result.intent.value,
+                      }, ensure_ascii=False)
+                  )
                 yield self._format_sse_data("[DONE]")
                 return
 
@@ -796,7 +800,7 @@ class LegalChatWorkflow(BaseWorkflow):
             generation_payload = self._extract_generation_tool_payload(final_meta)
             frontend_sources = []
             final_intent = intent_result.intent.value
-            
+
             # g) Send Sources and final resolution
             if generation_payload is not None:
                 final_intent = "document_generation"
@@ -821,7 +825,7 @@ class LegalChatWorkflow(BaseWorkflow):
                     frontend_sources = cited[: self._max_sources]
                 if not frontend_sources:
                     final_intent = Intent.LEGAL_QUERY.value # keep intent but just pass empty sources
-            
+
             timing = {
                 "retrieval_ms": round((t_retrieval - t_start) * 1000, 1),
                 "total_ms": round((t_done - t_start) * 1000, 1),
