@@ -39,7 +39,6 @@ from app.shared.errors.exceptions import (
     FilesServiceError,
     PayloadValidationError,
 )
-from app.shared.utils.token_calculator import TokenCostCalculator
 logger = get_logger(__name__)
 
 
@@ -792,6 +791,7 @@ class LegalChatWorkflow(BaseWorkflow):
                     final_meta = metadata or {}
             logger.info(
                     f"[LLM TIME] Total LLM Generation Time: {time.perf_counter() - llm_stream_start:.4f} seconds")
+            from app.shared.utils.token_calculator import TokenCostCalculator
             input_tokens = TokenCostCalculator.estimate_tokens((assembled.prompt or "") + (system_prompt or ""))
             output_tokens = TokenCostCalculator.estimate_tokens(complete_answer)
             cost_per_1k = TokenCostCalculator.calculate_cost_per_1k(input_tokens, output_tokens)

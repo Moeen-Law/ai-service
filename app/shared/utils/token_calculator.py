@@ -1,10 +1,6 @@
-from typing import Dict, Any
-
-
 class TokenCostCalculator:
     """Utility to calculate estimated token usage and exact costs for Gemini 2.5 Flash."""
 
-    # الأسعار الرسمية من الصورة بالملي (لكل مليون توكن)
     INPUT_PRICE_PER_M = 0.30
     OUTPUT_PRICE_PER_M = 2.50
 
