@@ -42,6 +42,8 @@ class IntentClassificationResult:
     keywords: list = field(default_factory=list)
     likely_articles: list = field(default_factory=list)
     reply: Optional[str] = None
+    history: Optional[str] = None
+
 
 IntentResult = IntentClassificationResult
 
@@ -65,9 +67,10 @@ class IntentClassifier:
 Your task is to analyze the user's message, determine their intent, and return a strict JSON object.
 
 # INSTRUCTIONS:
-1. Identify the intent of the message.
-2. If it is a "legal_query", extract the legal domain, keywords, and likely articles (do NOT answer the legal question).
-3. If it is "chitchat", "vague", or "out_of_scope", you MUST generate a direct response acting as Mueen in the "reply" field. The "reply" MUST be in Arabic.
+1. Read the provided "Conversation History" (if any) to understand the context.
+2. Identify the intent of the LATEST user message. Use the history ONLY to resolve pronouns or missing context in the latest message (e.g., if the user asks "What if it's with poison?", the history will tell you they mean "murder"). Do NOT classify the history itself.
+3. If it is a "legal_query", extract the legal domain, keywords, and likely articles (do NOT answer the legal question).
+4. If it is "chitchat", "vague", or "out_of_scope", you MUST generate a direct response acting as Mueen in the "reply" field. The "reply" MUST be in Arabic.
 
 # INTENT CATEGORIES:
 1. "legal_query": Clear questions about Egyptian law, contracts, or document analysis (e.g., "ما حقوقي في الفصل التعسفي؟", "حلل هذا العقد").
@@ -118,12 +121,13 @@ For "chitchat", "vague", or "out_of_scope":
         """
         self._llm_service = llm_service
 
-    async def classify(self, message: str) -> IntentClassificationResult:
+    async def classify(self, message: str, history: str = "") -> IntentClassificationResult:
         """
         Classify the intent of a user message.
 
         Args:
             message: The user message to classify
+            history:the history of user messages
 
         Returns:
             IntentClassificationResult with the classified intent and metadata
@@ -133,7 +137,7 @@ For "chitchat", "vague", or "out_of_scope":
         """
         logger.debug("classifying_intent", message_preview=message[:100])
 
-        prompt = self._build_classification_prompt(message)
+        prompt = self._build_classification_prompt(message, history)
         request = LLMRequest(
             prompt=prompt,
             system_prompt=self._SYSTEM_PROMPT,
@@ -142,7 +146,7 @@ For "chitchat", "vague", or "out_of_scope":
 
         try:
             response = await self._llm_service.generate(request)
-            result = self._parse_classification_response(response.content)
+            result = self._parse_classification_response(response.content, history)
             logger.debug(
                 "classified",
                 intent=result.intent.value,
@@ -151,29 +155,30 @@ For "chitchat", "vague", or "out_of_scope":
             return result
         except ValueError as e:
             logger.warning("classification_parse_failed", error=str(e))
-            # Graceful fallback: treat as vague if classification fails
             return IntentClassificationResult(
                 intent=Intent.VAGUE,
                 confidence=0.5,
                 reasoning="فشل التصنيف - تم افتراض سؤال غير واضح",
+                history=history,
             )
         except Exception as e:
             logger.error("classification_failed", error=str(e))
             raise
 
-    def _build_classification_prompt(self, message: str) -> str:
+    def _build_classification_prompt(self, message: str, history: str) -> str:
         """
         Build the classification prompt from the system instructions and user message.
 
         Args:
             message: The user message to classify
+            history
 
         Returns:
             User message prompt for classification.
         """
-        return f'الرسالة المراد تصنيفها:\n"{message}"\n\nاستجابتك (JSON فقط):'
-
-    def _parse_classification_response(self, response_text: str) -> IntentClassificationResult:
+        history_block = f"=== سجل المحادثة السابق (Conversation History) ===\n{history}\n\n" if history.strip() and history != "لا يوجد سجل محادثة سابق." else ""
+        return f'{history_block}=== الرسالة المراد تصنيفها (Latest Message) ===\n"{message}"\n\nاستجابتك (JSON فقط):'
+    def _parse_classification_response(self, response_text: str, history: str = "") -> IntentClassificationResult:
         """
         Parse LLM response into IntentClassificationResult.
 
@@ -181,6 +186,7 @@ For "chitchat", "vague", or "out_of_scope":
 
         Args:
             response_text: The raw response from LLM
+            history
 
         Returns:
             Parsed IntentClassificationResult
@@ -189,7 +195,6 @@ For "chitchat", "vague", or "out_of_scope":
             ValueError: If response format is invalid
         """
         try:
-            # Extract JSON from response (handle cases with extra text)
             json_start = response_text.find("{")
             json_end = response_text.rfind("}") + 1
 
@@ -199,73 +204,44 @@ For "chitchat", "vague", or "out_of_scope":
             json_str = response_text[json_start:json_end]
             data = json.loads(json_str)
 
-            # Validate and parse intent
             intent_str = data.get("intent", "").lower()
             if intent_str not in [e.value for e in Intent]:
                 raise ValueError(f"Invalid intent: {intent_str}")
 
             intent = Intent(intent_str)
 
-            # Parse other fields with defaults
             raw_confidence = float(data.get("confidence", 0.5))
             if raw_confidence < 0.0 or raw_confidence > 1.0:
-                logger.warning(
-                    "confidence_out_of_range",
-                    raw_value=raw_confidence,
-                    intent=intent_str,
-                )
-            confidence = max(0.0, min(1.0, raw_confidence))  # Clamp to [0, 1]
+                logger.warning("confidence_out_of_range", raw_value=raw_confidence, intent=intent_str)
+            confidence = max(0.0, min(1.0, raw_confidence))
 
-            reasoning = str(data.get("reasoning", "")).strip()
-            if not reasoning:
-                reasoning = f"تم تصنيف الرسالة كـ {intent.value}"
+            reasoning = str(data.get("reasoning", "")).strip() or f"تم تصنيف الرسالة كـ {intent.value}"
 
             clarification = data.get("suggested_clarification")
-            if clarification == "null" or clarification is None:
-                clarification = None
-            else:
-                clarification = str(clarification).strip()
+            clarification = None if clarification in ["null", None] else str(clarification).strip()
 
             reply = data.get("reply")
-            if reply == "null" or not reply:
-                reply = None
-            else:
-                reply = str(reply).strip()
-            # Parse rewrite data (only for legal_query)
+            reply = None if reply in ["null", None, ""] else str(reply).strip()
+
             domain = None
             keywords = []
             likely_articles = []
 
             if intent == Intent.LEGAL_QUERY:
                 domain = data.get("domain")
-                if domain == "null" or not domain:
-                    domain = None
+                domain = None if domain in ["null", None, ""] else domain
 
                 keywords = data.get("keywords", [])
-                keywords = (
-                    [str(k).strip() for k in keywords if k]
-                    if isinstance(keywords, list)
-                    else []
-                )
+                keywords = [str(k).strip() for k in keywords if k] if isinstance(keywords, list) else []
 
                 likely_articles = data.get("likely_articles", [])
-                likely_articles = (
-                    [str(a).strip() for a in likely_articles if a]
-                    if isinstance(likely_articles, list)
-                    else []
-                )
+                likely_articles = [str(a).strip() for a in likely_articles if a] if isinstance(likely_articles, list) else []
                 original_likely_articles = likely_articles
-                likely_articles = [
-                    a for a in likely_articles if re.fullmatch(r"\d+", a)
-                ]
-                dropped_articles = sorted(
-                    set(original_likely_articles) - set(likely_articles)
-                )
+                likely_articles = [a for a in likely_articles if re.fullmatch(r"\d+", a)]
+
+                dropped_articles = sorted(set(original_likely_articles) - set(likely_articles))
                 if dropped_articles:
-                    logger.warning(
-                        "likely_articles_filtered",
-                        dropped=dropped_articles,
-                    )
+                    logger.warning("likely_articles_filtered", dropped=dropped_articles)
 
             return IntentClassificationResult(
                 intent=intent,
@@ -276,7 +252,7 @@ For "chitchat", "vague", or "out_of_scope":
                 keywords=keywords,
                 likely_articles=likely_articles,
                 reply=reply,
-
+                history=history,
             )
         except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
             logger.warning("classification_response_parse_failed", error=str(e))

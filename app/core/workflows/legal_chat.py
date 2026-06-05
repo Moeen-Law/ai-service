@@ -141,7 +141,9 @@ class LegalChatWorkflow(BaseWorkflow):
     async def classify_intent_node(self, state: LegalChatState) -> Dict[str, Any]:
         files_ids = state.get("files_ids", [])
         question = state.get("message", "")
-        intent_result = await self._intent_classifier.classify(question)
+        conversation_history= state.get("conversation_history", [])
+        formatted_history=self._format_conversation_history(conversation_history)
+        intent_result = await self._intent_classifier.classify(question,history=formatted_history)
         if files_ids and intent_result.intent != Intent.LEGAL_QUERY:
             logger.info(
                 "intent_overridden_due_to_files",
@@ -150,6 +152,7 @@ class LegalChatWorkflow(BaseWorkflow):
             )
             intent_result = IntentClassificationResult(
                 intent=Intent.LEGAL_QUERY,
+                history=formatted_history,
                 confidence=1.0,
                 domain=intent_result.domain,
                 keywords=intent_result.keywords,
@@ -669,7 +672,8 @@ class LegalChatWorkflow(BaseWorkflow):
                 )
 
             # 1) Intent classification
-            intent_result = await self._intent_classifier.classify(question)
+            formatted_history = self._format_conversation_history(conversation_history or [])
+            intent_result = await self._intent_classifier.classify(question, history=formatted_history)
             logger.info(f"Intent classification result: {intent_result.intent.value} (confidence: {intent_result.confidence}, reasoning: {intent_result.reasoning})")
             if normalized_files_ids and intent_result.intent != Intent.LEGAL_QUERY:
                 intent_result = IntentClassificationResult(
