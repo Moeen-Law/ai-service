@@ -66,8 +66,9 @@ class Settings(BaseSettings):
     FILES_MAX_EXTRACTED_TOTAL_CHARS: int = 50000
 
     # --- AI / LLM Configuration ---
+    GEMINI_API_KEYS: str = ""
     GEMINI_API_KEY: str = ""
-    LLM_MODEL: str = "gemini-2.0-flash"
+    LLM_MODEL: str = "gemini-2.5-flash"
     LLM_TEMPERATURE: float = 0.0
     LLM_REQUEST_TIMEOUT_SECONDS: int = 30
     LLM_MAX_RETRIES: int = 2

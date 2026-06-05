@@ -7,7 +7,6 @@ Supports both single-shot generation and async streaming (SSE).
 
 import asyncio
 import json
-
 from typing import Any, AsyncIterator, Optional, Sequence
 import time
 
@@ -80,12 +79,81 @@ class GeminiLLMService(LLMServiceInterface):
         self._request_timeout_seconds = settings.LLM_REQUEST_TIMEOUT_SECONDS
         self._max_retries = settings.LLM_MAX_RETRIES
         self._retry_base_delay_seconds = settings.LLM_RETRY_BASE_DELAY_SECONDS
-        self._llm = ChatGoogleGenerativeAI(
-            model=self._model_name,
-            temperature=settings.LLM_TEMPERATURE,
-            google_api_key=settings.GEMINI_API_KEY,
-        )
+        self._temperature = settings.LLM_TEMPERATURE
+
+        # 1. Process multi-API key configuration
+        # Read from GEMINI_API_KEYS (comma-separated), falling back to GEMINI_API_KEY if not found
+        raw_keys = getattr(settings, "GEMINI_API_KEYS", "") or settings.GEMINI_API_KEY
+        self._api_keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+
+        if not self._api_keys:
+            raise ValueError("No Gemini API keys configured in settings.")
+
+        # 2. Initialize tracking sliding windows (Requests Per Minute) for each key
+        self._keys_tracker = {
+            key: {"requests_count": 0, "window_start": time.monotonic()}
+            for key in self._api_keys
+        }
+
+        # Mutex lock to prevent race conditions during concurrent tracker updates
+        self._lock = asyncio.Lock()
         self._last_successful_generation_at: Optional[float] = None
+
+    async def _get_best_llm_instance(self) -> tuple[ChatGoogleGenerativeAI, str]:
+        """Finds the most available API key under the rate limits and returns a bound LLM instance."""
+        async with self._lock:
+            now = time.monotonic()
+
+            # Reset sliding window counters if 60 seconds have elapsed
+            for key in self._api_keys:
+                tracker = self._keys_tracker[key]
+                if now - tracker["window_start"] >= 60.0:
+                    tracker["requests_count"] = 0
+                    tracker["window_start"] = now
+
+            # Safe threshold per minute for Gemini Free Tier keys to mitigate 429 exceptions
+            SAFE_LIMIT_PER_MINUTE = 5
+
+            available_keys = [
+                k for k in self._api_keys
+                if self._keys_tracker[k]["requests_count"] < SAFE_LIMIT_PER_MINUTE
+            ]
+
+            if not available_keys:
+                # Emergency fallback: if all keys are saturated, select the least loaded key to avoid downtime
+                selected_key = min(self._api_keys, key=lambda k: self._keys_tracker[k]["requests_count"])
+                logger.warning("all_keys_saturated_forcing_lowest_load", key_index=self._api_keys.index(selected_key))
+            else:
+                # Load balance: prioritize the healthy key with the minimum request load in the current minute
+                selected_key = min(available_keys, key=lambda k: self._keys_tracker[k]["requests_count"])
+
+            # Increment request tracker payload for the selected key prior to invocation
+            self._keys_tracker[selected_key]["requests_count"] += 1
+
+            key_index = self._api_keys.index(selected_key)
+
+            masked_key = f"{selected_key[:4]}...{selected_key[-4:]}" if len(selected_key) > 8 else "invalid_key"
+
+            logger.info(
+                "api_key_selected",
+                key_index=key_index,
+                masked_key=masked_key,
+                current_minute_load=self._keys_tracker[selected_key]["requests_count"]
+            )
+
+            # Instantiating the LangChain chat model wrapper with the selected active API key
+            llm_instance = ChatGoogleGenerativeAI(
+                model=self._model_name,
+                temperature=self._temperature,
+                google_api_key=selected_key,
+            )
+            return llm_instance, selected_key
+
+    async def _decrease_key_load(self, key: str) -> None:
+        """Helper to reclaim quota if a request fails immediately."""
+        async with self._lock:
+            if key in self._keys_tracker and self._keys_tracker[key]["requests_count"] > 0:
+                self._keys_tracker[key]["requests_count"] -= 1
 
     # ------------------------------------------------------------------
     # Single-shot generation
@@ -99,9 +167,11 @@ class GeminiLLMService(LLMServiceInterface):
         messages.append(HumanMessage(content=request.prompt))
 
         for attempt in range(attempts):
+            # Fetch a fresh load-balanced instance for every retry attempt to enforce failover stability
+            llm, active_key = await self._get_best_llm_instance()
             try:
                 result = await asyncio.wait_for(
-                    self._llm.ainvoke(messages),
+                    llm.ainvoke(messages),
                     timeout=self._request_timeout_seconds,
                 )
 
@@ -116,6 +186,7 @@ class GeminiLLMService(LLMServiceInterface):
                     finish_reason="stop",
                 )
             except Exception as exc:
+                await self._decrease_key_load(active_key)
                 is_last_attempt = attempt == attempts - 1
                 logger.warning(
                     "llm_generate_attempt_failed",
@@ -155,13 +226,14 @@ class GeminiLLMService(LLMServiceInterface):
         prompt: str,
         system_prompt: Optional[str] = None,
     ) -> AsyncIterator[str]:
-        """Yield tokens one-by-one from Gemini's async stream."""
+        """Yield tokens one-by-one from Gemini's async stream using dynamic keys."""
+        llm, _ = await self._get_best_llm_instance()
         messages = []
         if system_prompt:
             messages.append(SystemMessage(content=system_prompt))
         messages.append(HumanMessage(content=prompt))
 
-        async for chunk in self._llm.astream(messages):
+        async for chunk in llm.astream(messages):
             token = chunk.content if hasattr(chunk, "content") else str(chunk)
             token = _coerce_to_text(token)
             if token:
@@ -180,7 +252,8 @@ class GeminiLLMService(LLMServiceInterface):
         if max_iterations < 1:
             raise ValueError("max_iterations must be >= 1")
 
-        llm_with_tools = self._llm.bind_tools(list(tools))
+        llm, _ = await self._get_best_llm_instance()
+        llm_with_tools = llm.bind_tools(list(tools))
         tool_map = {tool.name: tool for tool in tools}
 
         messages = []
@@ -261,9 +334,11 @@ class GeminiLLMService(LLMServiceInterface):
             tools: Sequence[Any],
             max_iterations: int = 6,
     ) -> AsyncIterator[tuple[str, bool, Optional[dict[str, Any]]]]:
-        """Run a tool-calling loop and stream assistant responses in real time."""
+        """Run a tool-calling loop and stream assistant responses in real time with Load Balancing."""
 
         if not tools:
+            # Direct chat streaming branch backed by quota-aware balanced keys
+            last_chunk = None
             async for chunk in self.astream(
                     request.prompt,
                     system_prompt=request.system_prompt,
@@ -281,26 +356,23 @@ class GeminiLLMService(LLMServiceInterface):
         if max_iterations < 1:
             raise ValueError("max_iterations must be >= 1")
 
-        llm_with_tools = self._llm.bind_tools(list(tools))
+        # Agent tools streaming loop branch
+        llm, _ = await self._get_best_llm_instance()
+        llm_with_tools = llm.bind_tools(list(tools))
         tool_map = {tool.name: tool for tool in tools}
 
         messages = []
-
         if request.system_prompt:
             messages.append(SystemMessage(content=request.system_prompt))
-
         messages.append(HumanMessage(content=request.prompt))
 
         tool_calls_count = 0
         tool_invocations: list[dict[str, Any]] = []
 
         for _ in range(max_iterations):
-
             full_msg = None
-
             try:
                 stream = llm_with_tools.astream(messages)
-
                 while True:
                     try:
                         chunk = await asyncio.wait_for(
@@ -315,102 +387,61 @@ class GeminiLLMService(LLMServiceInterface):
                     else:
                         full_msg += chunk
 
-                    content = (
-                        chunk.content
-                        if hasattr(chunk, "content")
-                        else str(chunk)
-                    )
-
+                    content = chunk.content if hasattr(chunk, "content") else str(chunk)
                     content = _coerce_to_text(content)
 
-                    # REAL STREAMING HERE
                     if content:
                         yield content, False, None
                         await asyncio.sleep(0)
 
             except asyncio.TimeoutError:
-                raise TimeoutError(
-                    f"LLM streaming exceeded timeout "
-                    f"({self._request_timeout_seconds}s)"
-                )
+                raise TimeoutError(f"LLM streaming exceeded timeout ({self._request_timeout_seconds}s)")
 
             ai_msg = full_msg
-
             if ai_msg is None:
                 ai_msg = AIMessage(content="")
 
             messages.append(ai_msg)
-
             tool_calls = getattr(ai_msg, "tool_calls", None) or []
 
-            # FINAL ANSWER (NO MORE TOOLS)
             if not tool_calls:
                 self._last_successful_generation_at = time.monotonic()
-
                 yield "", True, {
                     "tool_calls_count": tool_calls_count,
                     "tool_invocations": tool_invocations,
                 }
-
                 return
 
-            # EXECUTE TOOL CALLS
             for idx, call in enumerate(tool_calls):
-
                 tool_name = call.get("name")
-
                 tool_obj = tool_map.get(tool_name)
-
                 if tool_obj is None:
-                    raise ValueError(
-                        f"Model requested unknown tool: {tool_name}"
-                    )
+                    raise ValueError(f"Model requested unknown tool: {tool_name}")
 
                 tool_args = call.get("args", {})
-
                 if not isinstance(tool_args, dict):
                     tool_args = {}
 
                 tool_calls_count += 1
-
                 tool_result = await tool_obj.ainvoke(tool_args)
-
                 tool_invocations.append(
-                    {
-                        "name": tool_name,
-                        "args": tool_args,
-                        "result": tool_result,
-                    }
+                    {"name": tool_name, "args": tool_args, "result": tool_result}
                 )
 
                 if isinstance(tool_result, str):
                     tool_result_text = tool_result
                 else:
                     try:
-                        tool_result_text = json.dumps(
-                            tool_result,
-                            ensure_ascii=False,
-                        )
+                        tool_result_text = json.dumps(tool_result, ensure_ascii=False)
                     except TypeError:
                         tool_result_text = str(tool_result)
 
-                call_id = (
-                        call.get("id")
-                        or f"tool_call_{tool_calls_count}_{idx}"
-                )
-
+                call_id = call.get("id") or f"tool_call_{tool_calls_count}_{idx}"
                 messages.append(
-                    ToolMessage(
-                        content=tool_result_text,
-                        tool_call_id=call_id,
-                        name=tool_name,
-                    )
+                    ToolMessage(content=tool_result_text, tool_call_id=call_id, name=tool_name)
                 )
 
-        raise RuntimeError(
-            "Tool-calling loop exceeded max_iterations "
-            "without final response"
-        )
+        raise RuntimeError("Tool-calling loop exceeded max_iterations without final response")
 
     # ------------------------------------------------------------------
     # Health
@@ -418,9 +449,8 @@ class GeminiLLMService(LLMServiceInterface):
 
     async def health_check(self) -> bool:
         try:
-            _ = getattr(self._llm, "model", None) or getattr(
-                self._llm, "model_name", None
-            )
+            llm, _ = await self._get_best_llm_instance()
+            _ = getattr(llm, "model", None) or getattr(llm, "model_name", None)
 
             if (
                 self._last_successful_generation_at is not None
@@ -428,9 +458,7 @@ class GeminiLLMService(LLMServiceInterface):
             ):
                 return True
 
-            # LangChain's Gemini chat wrapper does not expose a zero-cost ping;
-            # use a short, cached fallback generation only when no recent call succeeded.
-            result = await asyncio.wait_for(self._llm.ainvoke("ping"), timeout=3.0)
+            result = await asyncio.wait_for(llm.ainvoke("ping"), timeout=3.0)
             if result:
                 self._last_successful_generation_at = time.monotonic()
                 return True
