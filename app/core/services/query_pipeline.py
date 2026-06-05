@@ -195,7 +195,7 @@ class QueryPipeline:
         logger.info(
             f"[Pipeline TIME] Step 6 (Cross-Reference Injection) took {time.time() - cross_ref_start:.4f} seconds")
 
-        max_allowed_docs = 7
+        max_allowed_docs = 12
         if len(retrieved_docs) > max_allowed_docs:
             logger.info(
                 f"[Pipeline] Trimming final docs from {len(retrieved_docs)} to {max_allowed_docs} for LLM efficiency.")

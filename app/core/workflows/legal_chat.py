@@ -226,18 +226,19 @@ class LegalChatWorkflow(BaseWorkflow):
                 ),
             },
         )
-        return {"assembled_prompt": assembled.prompt}
+        return {"assembled_prompt": assembled.prompt,"system_prompt": assembled.system_prompt}
 
     async def build_tools_node(self, state: LegalChatState) -> Dict[str, Any]:
         files_ids = state.get("files_ids", [])
         question = state.get("message", "")
-
+        base_system_prompt = state.get("system_prompt", "")
         tools = self._build_agent_tools(files_ids=files_ids, source_prompt=question)
-        system_prompt = self._build_agent_system_prompt(files_ids=files_ids)
+        agent_system_prompt = self._build_agent_system_prompt(files_ids=files_ids)
+        combined_system_prompt = f"{base_system_prompt}\n\n=== تعليمات استخدام الأدوات ===\n{agent_system_prompt}"
 
         return {
             "tools": tools,
-            "system_prompt": system_prompt
+            "system_prompt": combined_system_prompt
         }
 
     async def llm_generate_node(self, state: LegalChatState) -> Dict[str, Any]:
@@ -761,7 +762,10 @@ class LegalChatWorkflow(BaseWorkflow):
                 tools = self._build_agent_tools(files_ids=normalized_files_ids, source_prompt=question)
             else:
                 tools=[]
-            system_prompt = self._build_agent_system_prompt(files_ids=normalized_files_ids)
+            agent_instructions = self._build_agent_system_prompt(files_ids=normalized_files_ids)
+            base_system_prompt = assembled.system_prompt or ""
+
+            combined_system_prompt = f"{base_system_prompt}\n\n=== تعليمات استخدام الأدوات ===\n{agent_instructions}"
 
             # f) Stream Response with tools integration
             final_meta = {}
@@ -773,7 +777,7 @@ class LegalChatWorkflow(BaseWorkflow):
             async for chunk, is_final, metadata in self._llm.stream_with_tools(
                 LLMRequest(
                     prompt=assembled.prompt,
-                    system_prompt=system_prompt,
+                    system_prompt=combined_system_prompt,
                 ),
                 tools=tools,
             ):
@@ -792,7 +796,7 @@ class LegalChatWorkflow(BaseWorkflow):
             logger.info(
                     f"[LLM TIME] Total LLM Generation Time: {time.perf_counter() - llm_stream_start:.4f} seconds")
             from app.shared.utils.token_calculator import TokenCostCalculator
-            input_tokens = TokenCostCalculator.estimate_tokens((assembled.prompt or "") + (system_prompt or ""))
+            input_tokens = TokenCostCalculator.estimate_tokens((assembled.prompt or "") + (combined_system_prompt or ""))
             output_tokens = TokenCostCalculator.estimate_tokens(complete_answer)
             cost_per_1k = TokenCostCalculator.calculate_cost_per_1k(input_tokens, output_tokens)
 

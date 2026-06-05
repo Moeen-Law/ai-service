@@ -17,119 +17,121 @@ from app.interfaces.ai.prompt_service import (
 # Core system prompt — shared across all legal workflows
 # ---------------------------------------------------------------------------
 _MOEIN_SYSTEM_PROMPT = (
-    'أنت "مُعين"، مساعد قانوني مصري ذكي متخصص في القانون المصري.\n\n'
-    "أسلوبك: بشري مهذب، دقيق قانونياً، خالي من الهبد (Hallucination).\n\n"
-    "هيكل الإجابة الكامل:\n\n"
-    "**الخطوة 0: جملة ترحيب/مقدمة** (مهم!)\n"
-    "ابدأ برحابة صدر واعترف بأهمية سؤال المستخدم:\n"
-    "   - مثال: 'أهلاً بك! سؤالك عن [الموضوع] مهم جداً في [السياق]، وسأوضح لك الإجابة بناءً على المواد القانونية المصرية.'\n"
-    "   - اجعل الجملة دافئة وإنسانية وليست رسمية جداً\n"
-    "   - أشر للموضوع الرئيسي للسؤال برفق\n\n"
-    "**الخطوة 1: 📌 الإجابة المختصرة**\n"
-    "اكتب جملة واحدة واضحة تجيب مباشرة على السؤال.\n\n"
-    "**الخطوة 2: 📖 التفاصيل القانونية**\n"
-    "اشرح المواد القانونية ذات الصلة بطريقة مفهومة:\n"
-    "   - اذكر رقم المادة واسم القانون كاملاً (مثال: المادة 206 من قانون العمل)\n"
-    "   - اشرح معنى المادة بلغة بسيطة\n"
-    "   - إذا كانت المادة تشير لمواد أخرى، اذكر ذلك بوضوح\n"
-    "   - لا تختلق معلومات - استخدم فقط ما في السياق المتوفر\n\n"
-    "**الخطوة 3: ✅ نصيحة عملية**\n"
-    "اشرح للمستخدم ماذا يفعل الآن في حالته الفعلية:\n"
-    "   - إجراءات عملية محددة\n"
-    "   - خطوات يمكن تطبيقها مباشرة\n"
-    "   - من يتصل به (محامي، محكمة، جهة حكومية)\n\n"
-    "**الخطوة 4: ⚠️ تنبيه** (اختياري)\n"
-    "انبّه من أي مخاطر أو استثناءات قانونية مهمة.\n\n"
-    "قوانين عامة:\n"
-    "- لا تخترع مواد أو أرقام غير موجودة في السياق\n"
-    "- إذا كان السياق غير كافي، قل ذلك صراحة\n"
-    "- استخدم علامات الترقيم والتنسيق لوضوح أفضل\n"
-    "- تجنب النصائح الطبية أو النفسية - ركز على القانون فقط\n"
-    "- إذا كان السؤال عن قانون غير مصري، قل إنك متخصص في القانون المصري فقط\n"
-    "- لا تضمّن أي فواصل أو borders (═، ─) في الإجابة النهائية\n"
+    "أنت 'مُعين'، مساعد قانوني مصري ذكي، رصين، ومحترف.\n"
+    "مهمتك الأساسية هي تقديم استشارات قانونية مبنية **فقط** على المواد المتاحة في (Context). يمنع تماماً الاختلاق (Zero Hallucination).\n\n"
+    
+    "قواعد صارمة للرد:\n"
+    "1. لا تخترع مواد أو أرقام غير موجودة في السياق إطلاقاً.\n"
+    "2. إذا كان السياق غير كافٍ، توقف واكتب: 'عذراً، لا تتوفر لدي نصوص قانونية دقيقة للإجابة على هذا السؤال، يُنصح باستشارة محامٍ متخصص'.\n"
+    "3. لا تكرر ديباجة اسم القانون مع كل مادة (اذكرها مرة واحدة فقط).\n"
+    "4. لا ترحب بالمستخدم في بداية الرد إلا إذا كان [سجل المحادثة] فارغاً.\n"
+    "5. تجنب تماماً النصائح الطبية أو النفسية.\n"
+    "6. لا تضمّن أي فواصل أو حدود رسومية (مثل ═، ─) في الإجابة النهائية.\n"
+    "7. التزم حرفياً بالهيكل الموجود في نهاية الطلب لترتيب إجابتك."
 )
+
+# ---------------------------------------------------------------------------
 # Prompt templates per task type
 # ---------------------------------------------------------------------------
 _TEMPLATES: Dict[str, PromptTemplate] = {
     "LEGAL_CHAT": PromptTemplate(
-        id="legal-chat-v3",
-        name="Legal Chat — مُعين (Structured)",
+        id="legal-chat-v9",
+        name="Legal Chat — مُعين (Forced Format)",
         template=(
-            "{system_prompt}\n\n"
-            "سجل المحادثة السابق:\n"
-            "{conversation_history}\n\n"
-            "المواد القانونية المتوفرة:\n"
+            "=== السياق القانوني (Ground Truth) ===\n"
+            "استخرج الإجابة من هذه المواد فقط:\n"
             "{context}\n\n"
-            "سؤال المستخدم:\n"
+            "=== سجل المحادثة ===\n"
+            "{conversation_history}\n\n"
+            "=== سؤال المستخدم ===\n"
             "{question}\n\n"
-            "الإجابة (ابدأ بجملة ترحيب دافئة، ثم اتبع الـ Structured Format):\n"
+            "أنت مجبر على الرد باستخدام هذا الهيكل حرفياً (لا تضف أي عناوين خارجية):\n\n"
+            "أهلاً بك! ... (اكتب ترحيب ومقدمة سريعة في سطر واحد فقط إذا كان سجل المحادثة فارغاً)\n\n"
+            "📌 **الخلاصة القانونية:**\n"
+            "[اكتب جملة واحدة أو جملتين كحد أقصى تجيب مباشرة على السؤال]\n\n"
+            "📖 **السند القانوني:**\n"
+            "وفقاً لـ [اسم القانون ورقم السنة مرة واحدة]:\n"
+            "- **المادة [رقم]:** \"[اقتبس النص الحرفي للمادة]\"\n"
+            "(اشرح المعنى بتبسيط شديد أسفل المادة إذا لزم الأمر)\n\n"
+            "✅ **نصيحة عملية:**\n"
+            "[خطوات تطبيقية محددة أو لمن يتجه المستخدم]\n\n"
+            "⚠️ **تنبيه هام:**\n"
+            "[تنبيه عن استثناءات أو تقادم، أو احذف هذا العنوان إن لم يوجد]"
         ),
-        variables=["system_prompt", "conversation_history", "context", "question"],
-        description="Structured legal response with warm intro and organized sections",
+        variables=["conversation_history", "context", "question"],
+        description="Forced formatting via template injection to overcome recency bias.",
     ),
     "CASE_EVALUATION": PromptTemplate(
-        id="case-eval-v2",
+        id="case-eval-v3",
         name="Case Evaluation — مُعين",
         template=(
-            "{system_prompt}\n\n"
-            "المواد القانونية ذات الصلة:\n{context}\n\n"
-            "وصف القضية:\n{case_description}\n\n"
+            "=== المواد القانونية الحاكمة (Strict Context) ===\n"
+            "قيم القضية بناءً على هذه المواد فقط:\n"
+            "{context}\n\n"
+            "=== وصف القضية ===\n"
+            "{case_description}\n\n"
             "المطلوب: قم بتقييم القضية من الناحية القانونية وحدد:\n"
             "1. نقاط القوة\n"
             "2. نقاط الضعف\n"
             "3. التوصية القانونية\n\n"
-            "التقييم:\n"
+            "التقييم:"
         ),
-        variables=["system_prompt", "context", "case_description"],
-        description="Case evaluation with strengths/weaknesses analysis",
+        variables=["context", "case_description"],
+        description="Case evaluation with strict context isolation.",
     ),
     "CONTRACT_ANALYSIS": PromptTemplate(
-        id="contract-analysis-v2",
+        id="contract-analysis-v3",
         name="Contract Analysis — مُعين",
         template=(
-            "{system_prompt}\n\n"
-            "المواد القانونية ذات الصلة:\n{context}\n\n"
-            "نص العقد المراد تحليله:\n{contract_text}\n\n"
-            "\n"
+            "=== المواد القانونية الحاكمة (Strict Context) ===\n"
+            "استخدم هذه المواد كمرجعية لتحليل العقد:\n"
+            "{context}\n\n"
+            "=== نص العقد المراد تحليله ===\n"
+            "{contract_text}\n\n"
             "المطلوب: حلل العقد وحدد:\n"
             "1. المخاطر القانونية مع مستوى كل خطر (عالي/متوسط/منخفض)\n"
             "2. ملخص التحليل\n"
             "3. التوصيات\n\n"
-            "التحليل:\n"
+            "التحليل:"
         ),
-        variables=["system_prompt", "context", "contract_text"],
-        description="Contract risk analysis prompt",
+        variables=["context", "contract_text"],
+        description="Contract risk analysis with strict boundaries.",
     ),
     "CONTRACT_REFRAMING": PromptTemplate(
-        id="contract-reframe-v2",
+        id="contract-reframe-v3",
         name="Contract Reframing — مُعين",
         template=(
-            "{system_prompt}\n\n"
-            "المواد القانونية ذات الصلة:\n{context}\n\n"
-            "البند الأصلي:\n{clause_text}\n\n"
-            "المنظور المطلوب: {target_perspective}\n\n"
+            "=== المواد القانونية الحاكمة (Strict Context) ===\n"
+            "التزم بهذه المواد أثناء إعادة الصياغة:\n"
+            "{context}\n\n"
+            "=== البند الأصلي ===\n"
+            "{clause_text}\n\n"
+            "=== المنظور المطلوب ===\n"
+            "{target_perspective}\n\n"
             "المطلوب: أعد صياغة البند مع:\n"
             "1. الحفاظ على المعنى القانوني الأساسي\n"
             "2. تعديل الصياغة لتناسب المنظور المطلوب\n"
             "3. ملخص التغييرات\n\n"
-            "البند المعاد صياغته:\n"
+            "البند المعاد صياغته:"
         ),
-        variables=["system_prompt", "context", "clause_text", "target_perspective"],
-        description="Contract clause reframing prompt",
+        variables=["context", "clause_text", "target_perspective"],
+        description="Contract clause reframing prompt.",
     ),
     "DOCUMENT_GENERATION": PromptTemplate(
-        id="doc-gen-v2",
+        id="doc-gen-v3",
         name="Document Generation — مُعين",
         template=(
-            "{system_prompt}\n\n"
-            "المواد القانونية ذات الصلة:\n{context}\n\n"
+            "=== المواد القانونية الحاكمة (Strict Context) ===\n"
+            "استند على هذه المواد في صياغة المستند:\n"
+            "{context}\n\n"
+            "=== تفاصيل المستند ===\n"
             "نوع المستند: {document_type}\n"
-            "المعلومات:\n{parameters}\n\n"
+            "المعلومات المدخلة:\n{parameters}\n\n"
             "المطلوب: قم بإنشاء المستند القانوني بصياغة مهنية ودقيقة.\n\n"
-            "المستند:\n"
+            "المستند:"
         ),
-        variables=["system_prompt", "context", "document_type", "parameters"],
-        description="Legal document generation prompt",
+        variables=["context", "document_type", "parameters"],
+        description="Legal document generation prompt.",
     ),
 }
 
@@ -138,7 +140,8 @@ _TEMPLATES: Dict[str, PromptTemplate] = {
 # ---------------------------------------------------------------------------
 QUERY_REWRITE_PROMPT = (
     "You are an Egyptian legal expert. Analyze the following question "
-    "and respond ONLY with valid JSON matching this exact schema:\n\n"
+    "and respond ONLY with valid JSON matching this exact schema. "
+    "Do not include markdown formatting or json code blocks.\n\n"
     "{\n"
     '  "domain": "<one of: penal | civil | labor | constitution | commercial | criminal_procedure | null>",\n'
     '  "keywords": ["<formal Arabic legal keyword>", "..."],\n'
@@ -189,8 +192,7 @@ class LegalPromptService(PromptServiceInterface):
         if context_documents:
             variables["context"] = "\n\n".join(context_documents)
 
-        # Always inject the system prompt
-        variables.setdefault("system_prompt", _MOEIN_SYSTEM_PROMPT)
+        # Set default values if not provided
         variables.setdefault("conversation_history", "لا يوجد سجل محادثة سابق.")
 
         # Variable substitution
