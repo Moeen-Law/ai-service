@@ -15,6 +15,7 @@ from app.core.workflows.base import BaseWorkflow
 from app.infrastructure.logging.logger import get_logger
 from app.interfaces.ai.llm_service import LLMRequest, LLMServiceInterface
 from app.interfaces.ai.rag_service import RAGQuery, RAGServiceInterface
+from app.interfaces.external.cache_service import CacheServiceInterface
 
 
 def _stringify_exception(exc: BaseException) -> str:
@@ -39,10 +40,11 @@ class TerminologyWorkflow(BaseWorkflow):
         self,
         llm_service: LLMServiceInterface,
         rag_service: RAGServiceInterface,
+        cache_service: CacheServiceInterface,
     ) -> None:
         self._llm_service = llm_service
         self._rag_service = rag_service
-
+        self._cache = cache_service
     @property
     def name(self) -> str:
         return "terminology_explanation_workflow"
@@ -64,6 +66,21 @@ class TerminologyWorkflow(BaseWorkflow):
         raw_response = None
 
         try:
+            cached_data = await self._cache.get(term)
+
+            if cached_data:
+                logger.info("semantic_cache_hit", terminology=term)
+                execution_time_ms = int((time.monotonic() - start_time) * 1000)
+                return Result.success(
+                    task_id=UUID(task_id) if isinstance(task_id, str) else task_id,
+                    task_type=TaskType.LEGAL_TERMINOLOGY,
+                    data=cached_data,
+                    metadata=ResultMetadata(
+                        execution_time_ms=execution_time_ms,
+                        model_used="semantic_cache",
+                        tokens_used=0
+                    ),
+                )
             # 1. Option to use RAG context
             if use_rag:
                 rag_query = RAGQuery(
@@ -145,13 +162,6 @@ class TerminologyWorkflow(BaseWorkflow):
             )
             examples = parsed.get("examples", [])
 
-            execution_time_ms = int((time.monotonic() - start_time) * 1000)
-            metadata = ResultMetadata(
-                execution_time_ms=execution_time_ms,
-                model_used=model_used,
-                tokens_used=tokens_used,
-            )
-
             data = {
                 "term": term,
                 "brief_explanation": brief_explanation,
@@ -160,6 +170,18 @@ class TerminologyWorkflow(BaseWorkflow):
                 "rag_used": rag_used,
                 "raw_response": raw_response,
             }
+            if brief_explanation and "لم نتمكن من صياغة الشرح" not in brief_explanation:
+                await self._cache.set(key=term, value=data)
+                logger.info("semantic_cache_saved", terminology=term)
+
+            execution_time_ms = int((time.monotonic() - start_time) * 1000)
+            metadata = ResultMetadata(
+                execution_time_ms=execution_time_ms,
+                model_used=model_used,
+                tokens_used=tokens_used,
+            )
+
+
 
             return Result.success(
                 task_id=UUID(task_id) if isinstance(task_id, str) else task_id,

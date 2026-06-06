@@ -10,15 +10,14 @@ import time
 from typing import Any, Dict, Optional
 from uuid import UUID
 
-
 from app.core.domain.entities import Context, ExecutionOptions, Result, ResultMetadata
 from app.core.domain.enums import TaskType
 from app.core.services.llm_json import extract_first_json_object
 from app.core.workflows.base import BaseWorkflow
 from app.infrastructure.logging.logger import get_logger
 from app.interfaces.ai.llm_service import LLMRequest, LLMServiceInterface
+from app.interfaces.external.cache_service import CacheServiceInterface
 from app.interfaces.external.search_service import SearchServiceInterface
-
 
 def _stringify_exception(exc: BaseException) -> str:
     message = str(exc).strip()
@@ -50,10 +49,11 @@ class GovernmentProcessesWorkflow(BaseWorkflow):
         self,
         search_service: SearchServiceInterface,
         llm_service: LLMServiceInterface,
+        cache_service:CacheServiceInterface,
     ) -> None:
         self._search = search_service
         self._llm = llm_service
-
+        self._cache = cache_service
     @property
     def name(self) -> str:
         return "government_processes_workflow"
@@ -81,12 +81,22 @@ class GovernmentProcessesWorkflow(BaseWorkflow):
             )
 
         try:
-            logger.info(
-                "government_processes_started",
-                query=query[:100],
-                task_id=task_id,
-            )
-
+            logger.info("government_processes_started", query=query[:100], task_id=task_id)
+            #0. Check Cache First
+            cached_data = await self._cache.get(query)
+            if cached_data:
+                logger.info("cache_hit", query=query)
+                execution_time_ms = int((time.monotonic() - start_time) * 1000)
+                return Result.success(
+                    task_id=UUID(task_id) if isinstance(task_id, str) else task_id,
+                    task_type = TaskType.GOVERNMENT_PROCESSES,
+                    data = cached_data,
+                    metadata = ResultMetadata(
+                        execution_time_ms=execution_time_ms,
+                        model_used="redis_cache",
+                        tokens_used=0,
+                    ),
+                )
             # 1. Build optimized search query
             search_query = self._build_search_query(query)
             logger.debug("search_query_built", search_query=search_query)
@@ -162,6 +172,9 @@ class GovernmentProcessesWorkflow(BaseWorkflow):
                 for result in search_response.results[:5]
             ]
             parsed_data["sources"] = sources
+            if parsed_data and not parsed_data.get("fallback"):
+                await self._cache.set(key=query, value=parsed_data)
+                logger.info("cache_saved", query=query)
 
             execution_time_ms = int((time.monotonic() - start_time) * 1000)
             metadata = ResultMetadata(

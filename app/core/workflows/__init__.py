@@ -19,8 +19,9 @@ from app.infrastructure.adapters import (
     get_search_service,
     prompt_service,
     rag_service,
-)
+    get_semantic_cache_service,
 
+)
 
 def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
     """
@@ -34,7 +35,6 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
     reg = registry or workflow_registry
     llm_service = get_llm_service()
     search_service = get_search_service()
-
     # Register each workflow for its corresponding task type
     reg.register(
         TaskType.LEGAL_CHAT,
@@ -64,13 +64,15 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
         TaskType.CASE_EVALUATION,
         CaseEvaluationWorkflow(rag_service, llm_service, prompt_service),
     )
+    term_cache = get_semantic_cache_service(namespace="terminology")
     reg.register(
         TaskType.LEGAL_TERMINOLOGY,
-        TerminologyWorkflow(llm_service, rag_service),
+        TerminologyWorkflow(llm_service, rag_service,term_cache),
     )
+    gov_cache = get_semantic_cache_service(namespace="gov_processes")
     reg.register(
         TaskType.GOVERNMENT_PROCESSES,
-        GovernmentProcessesWorkflow(search_service, llm_service),
+        GovernmentProcessesWorkflow(search_service, llm_service,gov_cache),
     )
 
 # Auto-register workflows when module is imported

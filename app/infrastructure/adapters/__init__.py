@@ -18,7 +18,7 @@ from app.infrastructure.adapters.prompt_adapter import (
 )
 from app.infrastructure.adapters.rag_adapter import QdrantRAGService, rag_service
 from app.infrastructure.adapters.search_service import TavilySearchAdapter, get_search_service
-
+from .cache_adapter import get_semantic_cache_service
 __all__ = [
     # Files Adapter
     "HTTPFileService",
@@ -39,4 +39,6 @@ __all__ = [
     # Search Adapter
     "TavilySearchAdapter",
     "get_search_service",
+    # Cache Adapter
+    "get_semantic_cache_service",
 ]

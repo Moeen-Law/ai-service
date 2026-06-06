@@ -93,6 +93,10 @@ class QdrantRAGService(RAGServiceInterface):
         self._domain_proto_vecs: Dict[str, List[float]] = {}
         self._initialized = False
 
+    @property
+    def qdrant_client(self) -> QdrantClient:
+        """Expose the Qdrant client for external services like Semantic Cache."""
+        return self._client
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

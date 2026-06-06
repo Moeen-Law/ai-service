@@ -43,3 +43,6 @@ numpy>=1.24.0
 
 # SSE Streaming
 sse-starlette>=1.6.0
+
+# Cache
+redis>=5.0.0

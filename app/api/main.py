@@ -18,7 +18,7 @@ from app.api.schemas.responses import TaskErrorResponse
 from app.infrastructure.adapters import rag_service
 from app.infrastructure.config.settings import get_settings
 from app.infrastructure.logging.logger import configure_logging, get_logger
-
+from app.infrastructure.adapters import get_semantic_cache_service
 # Configure logging on module import
 settings = get_settings()
 configure_logging(
@@ -52,6 +52,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Initialising RAG service …")
     await rag_service.initialize()
     logger.info("RAG service ready")
+
+    logger.info("Initialising Semantic Cache Collection …")
+    try:
+        semantic_cache = get_semantic_cache_service()
+        await semantic_cache.initialize_collection()
+    except Exception as e:
+        logger.error(f"Failed to init Semantic Cache: {e}")
 
     yield
 

@@ -90,6 +90,8 @@ class Settings(BaseSettings):
     BM25_WEIGHT: float = 0.2
     RETRIEVAL_K: int = 4
     MAX_FRONTEND_SOURCES: int = 7
+    # --- Redis Configuration ---
+    REDIS_URL: str = ""
 
     TAVILY_API_KEY: str = ""
     @property
