@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Initialising Semantic Cache Collection …")
     try:
         semantic_cache = get_semantic_cache_service()
-        await semantic_cache.initialize_collection()
+        semantic_cache.initialize_collection()
     except Exception as e:
         logger.error(f"Failed to init Semantic Cache: {e}")
 
