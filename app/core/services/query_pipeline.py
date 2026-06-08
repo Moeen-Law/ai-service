@@ -196,7 +196,9 @@ class QueryPipeline:
         logger.info(
             f"[Pipeline TIME] Step 6 (Cross-Reference Injection) took {time.time() - cross_ref_start:.4f} seconds")
 
-        max_allowed_docs = 12
+        if question_numbers:
+             retrieved_docs = self._rerank_by_article_match(retrieved_docs, question_numbers)
+        max_allowed_docs = 7
         if len(retrieved_docs) > max_allowed_docs:
             logger.info(
                 f"[Pipeline] Trimming final docs from {len(retrieved_docs)} to {max_allowed_docs} for LLM efficiency.")
@@ -223,7 +225,6 @@ class QueryPipeline:
         cited_nums: Set[str] = set()
         cited_nums.update(re.findall(r"الماد[ةه]\s+(\d+)", answer))
         cited_nums.update(re.findall(r"ماد[ةه]\s+(\d+)", answer))
-        cited_nums.update(re.findall(r"(?:^|\s)(\d+)(?:\s|$|[،,.])", answer))
 
         if not cited_nums:
             logger.info(
@@ -364,25 +365,19 @@ class QueryPipeline:
         preferred_domain: Optional[str],
         retrieval_k: int,
     ) -> List[Document]:
-        """Prioritise docs from the preferred domain."""
-        priority, other = [], []
-        for doc in docs:
-            content = doc.content or ""
-            if len(content.strip()) <= 20:
-                continue
-            if (
-                preferred_domain
-                and (doc.metadata or {}).get("domain", "") == preferred_domain
-            ):
-                priority.append(doc)
-            else:
-                other.append(doc)
+        """Prioritise docs from the preferred domain WITHOUT losing Qdrant's semantic order."""
+        
+        valid_docs = [d for d in docs if d.content and len(d.content.strip()) > 20]
+        
+        if not preferred_domain:
+            return valid_docs[: retrieval_k * 3]
 
-        combined = priority + other
-        if preferred_domain and priority:
-            return combined[: retrieval_k * 2]
-        return combined[: retrieval_k * 2]
-
+        valid_docs.sort(
+            key=lambda doc: (doc.metadata or {}).get("domain", "") == preferred_domain,
+            reverse=True
+        )
+        
+        return valid_docs[: retrieval_k * 3]
     def _inject_cross_references(
         self,
         docs: List[Document],

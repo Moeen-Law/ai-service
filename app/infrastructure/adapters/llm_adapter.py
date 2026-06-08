@@ -349,12 +349,14 @@ class GeminiLLMService(LLMServiceInterface):
             max_iterations: int = 6,
     ) -> AsyncIterator[tuple[str, bool, Optional[dict[str, Any]]]]:
         """Run a tool-calling loop and stream assistant responses in real time with Load Balancing."""
-        if not tools:
+        if not tools or len(tools) == 0:
             async for chunk in self.astream(
                     request.prompt,
                     system_prompt=request.system_prompt,
             ):
-                yield chunk, False, None
+                content = chunk.content if hasattr(chunk, "content") else str(chunk)
+                if content:
+                    yield content, False, None
 
             self._last_successful_generation_at = time.monotonic()
             yield "", True, {

@@ -66,14 +66,14 @@ class IntentClassifier:
 
     # System prompt for intent classification + query rewriting (Arabic-first)
     _SYSTEM_PROMPT = """
-    You are "Mueen" (معين), a fast intent classifier for an Egyptian AI legal assistant. 
+    You are "Mueen" (معين), an expert Egyptian legal knowledge extractor and intent classifier.
     Analyze the user's latest message and return a minimal JSON object.
 
     # INSTRUCTIONS:
     1. Identify the intent of the LATEST user message.
-    2. If it is "legal_query", extract the legal domain and Arabic keywords for search expansion (DO NOT answer the question).
+    2. If it is "legal_query", extract the domain, Arabic keywords, and PREDICT the exact Egyptian law article numbers related to the situation.
     3. If it is NOT a "legal_query", generate a direct Arabic response acting as Mueen in the "reply" field.
-    4. CRITICAL: For crime-related stories (fights, murder, self-defense, etc.), the domain MUST be "penal".
+    4. CRITICAL: For crime-related stories (fights, murder, self-defense, theft, etc.), the domain MUST be "penal".
     
     # INTENT CATEGORIES:
     - "legal_query": Questions about Egyptian law, contracts, or document analysis.
@@ -81,22 +81,28 @@ class IntentClassifier:
     - "vague": A legal query that is too broad and needs clarification.
     - "out_of_scope": Topics completely unrelated to law.
 
-    # LEGAL DOMAINS (CRITICAL RULES):
+    # LEGAL DOMAINS:
     You MUST choose ONLY ONE of the following or null:
-    - "penal": Use this ALWAYS for stories about crimes, fights, murder, theft, self-defense, or asking about penalties/punishments.
-    - "criminal_procedure": ONLY use this for procedural steps inside a court, appeals, or jurisdiction rules. Do NOT use this for crime stories.
-    - "civil": For contracts, compensation, rent, sales.
-    - "labor": For work, employees, salaries, termination.
-    - "constitution": For constitutional rights.
-    - "commercial": For business, companies, bankruptcy.
+    ["penal", "criminal_procedure", "civil", "labor", "constitution", "commercial"]
 
-    # EXPECTED MINIMAL JSON SCHEMA:
+    # ARTICLE PREDICTION RULES (CRITICAL):
+    - In "likely_articles", recall from your knowledge base the exact article numbers from the matching Egyptian Code.
+    - Self-Defense (دفاع شرعي) -> Predict ["245", "246", "247", "248", "249", "250", "251"]
+    - Theft (سرقة) -> Predict ["311", "313", "314", "315", "316", "317", "318"]
+    - Murder/Manslaughter (قتل عمد / ضرب أفضى إلى موت) -> Predict ["230", "234", "236"]
+    - Extortion/Bribery (ابتزاز / رشوة) -> Predict ["325", "326", "103"]
+    - Financial Damage/Breach of Trust (خيانة أمانة / تبديد) -> Predict ["341", "342"]
+    - Return ONLY the numbers as strings in an array, sorted by core rule first.
+    - If you are completely unsure about the specific article numbers, return an empty array []. Do NOT invent random numbers.
+
+    # EXPECTED JSON SCHEMA:
 
     For "legal_query":
     {
         "intent": "legal_query",
         "domain": "penal",
-        "keywords": ["الكلمة1", "الكلمة2", "الكلمة3"],
+        "keywords": ["دفاع شرعي", "مشاجرة", "قتل"],
+        "likely_articles": ["245", "246"],
         "reply": null
     }
 
@@ -105,12 +111,13 @@ class IntentClassifier:
         "intent": "chitchat | vague | out_of_scope",
         "domain": null,
         "keywords": [],
+        "likely_articles": [],
         "reply": "Your intelligent, helpful response in ARABIC here."
     }
 
     # CRITICAL RULES:
     - The "reply" field MUST ALWAYS BE IN ARABIC.
-    - Output ONLY valid JSON, no markdown formatting.
+    - Output ONLY valid JSON, no markdown formatting like ```json.
     """
     def __init__(self, llm_service: LLMServiceInterface=None) -> None:
         """
@@ -125,7 +132,7 @@ class IntentClassifier:
             api_key=settings.GROQ_API_KEY,
             model_name=getattr(settings, "INTENT_MODEL", "llama-3.1-8b-instant"),
             temperature=0.0, 
-            max_tokens=150, 
+            max_tokens=200, 
         )
 
     async def classify(self, message: str, history: str = "") -> IntentClassificationResult:
@@ -222,14 +229,17 @@ class IntentClassifier:
             keywords = data.get("keywords", [])
             keywords = [str(k).strip() for k in keywords if k] if isinstance(keywords, list) else []
 
+            likely_articles = data.get("likely_articles", [])
+            likely_articles = [str(a).strip() for a in likely_articles if a] if isinstance(likely_articles, list) else []
+
             return IntentClassificationResult(
                 intent=intent,
                 confidence=1.0,
                 reasoning="Fast Groq Classification",
                 suggested_clarification=None,
-                domain=domain,          # تم الإضافة
-                keywords=keywords,      # تم الإضافة
-                likely_articles=[],     # لغيناها عشان السرعة
+                domain=domain,         
+                keywords=keywords,      
+                likely_articles=likely_articles, 
                 reply=reply,
                 history=history,
             )
