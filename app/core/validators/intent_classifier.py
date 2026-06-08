@@ -11,9 +11,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from app.core.domain.enums import Intent
 from app.infrastructure.logging.logger import get_logger
+from app.infrastructure.config.settings import get_settings
 from app.interfaces.ai.llm_service import LLMRequest, LLMServiceInterface
+from langchain_groq import ChatGroq
 
 logger = get_logger(__name__)
 
@@ -62,64 +66,67 @@ class IntentClassifier:
 
     # System prompt for intent classification + query rewriting (Arabic-first)
     _SYSTEM_PROMPT = """
-    You are "Mueen" (معين), an intelligent and friendly Egyptian AI legal assistant. 
+    You are "Mueen" (معين), a fast intent classifier for an Egyptian AI legal assistant. 
+    Analyze the user's latest message and return a minimal JSON object.
 
-Your task is to analyze the user's message, determine their intent, and return a strict JSON object.
+    # INSTRUCTIONS:
+    1. Identify the intent of the LATEST user message.
+    2. If it is "legal_query", extract the legal domain and Arabic keywords for search expansion (DO NOT answer the question).
+    3. If it is NOT a "legal_query", generate a direct Arabic response acting as Mueen in the "reply" field.
+    4. CRITICAL: For crime-related stories (fights, murder, self-defense, etc.), the domain MUST be "penal".
+    
+    # INTENT CATEGORIES:
+    - "legal_query": Questions about Egyptian law, contracts, or document analysis.
+    - "chitchat": Greetings, thanks, or casual talk.
+    - "vague": A legal query that is too broad and needs clarification.
+    - "out_of_scope": Topics completely unrelated to law.
 
-# INSTRUCTIONS:
-1. Read the provided "Conversation History" (if any) to understand the context.
-2. Identify the intent of the LATEST user message. Use the history ONLY to resolve pronouns or missing context in the latest message (e.g., if the user asks "What if it's with poison?", the history will tell you they mean "murder"). Do NOT classify the history itself.
-3. If it is a "legal_query", extract the legal domain, keywords, and likely articles (do NOT answer the legal question).
-4. If it is "chitchat", "vague", or "out_of_scope", you MUST generate a direct response acting as Mueen in the "reply" field. The "reply" MUST be in Arabic.
+    # LEGAL DOMAINS (CRITICAL RULES):
+    You MUST choose ONLY ONE of the following or null:
+    - "penal": Use this ALWAYS for stories about crimes, fights, murder, theft, self-defense, or asking about penalties/punishments.
+    - "criminal_procedure": ONLY use this for procedural steps inside a court, appeals, or jurisdiction rules. Do NOT use this for crime stories.
+    - "civil": For contracts, compensation, rent, sales.
+    - "labor": For work, employees, salaries, termination.
+    - "constitution": For constitutional rights.
+    - "commercial": For business, companies, bankruptcy.
 
-# INTENT CATEGORIES:
-1. "legal_query": Clear questions about Egyptian law, contracts, or document analysis (e.g., "ما حقوقي في الفصل التعسفي؟", "حلل هذا العقد").
-2. "chitchat": Greetings, thanks, or casual talk (e.g., "شكرا", "ازيك").
-3. "vague": A legal query that is too broad and needs clarification (e.g., "حقوقي؟", "القانون").
-4. "out_of_scope": Topics completely unrelated to law (e.g., "الطقس", "أين أكل؟").
+    # EXPECTED MINIMAL JSON SCHEMA:
 
-# LEGAL DOMAINS (Use ONLY these):
-["penal", "civil", "labor", "constitution", "commercial", "criminal_procedure"]
+    For "legal_query":
+    {
+        "intent": "legal_query",
+        "domain": "penal",
+        "keywords": ["الكلمة1", "الكلمة2", "الكلمة3"],
+        "reply": null
+    }
 
-# EXPECTED JSON SCHEMA:
+    For others:
+    {
+        "intent": "chitchat | vague | out_of_scope",
+        "domain": null,
+        "keywords": [],
+        "reply": "Your intelligent, helpful response in ARABIC here."
+    }
 
-For "legal_query":
-{
-    "intent": "legal_query",
-    "confidence": 0.95,
-    "reasoning": "Brief explanation in English",
-    "domain": "labor",
-    "keywords": ["فصل", "تعسفي", "حقوق"],
-    "likely_articles": ["206", "207"],
-    "reply": null
-}
-
-For "chitchat", "vague", or "out_of_scope":
-{
-    "intent": "chitchat | vague | out_of_scope",
-    "confidence": 0.90,
-    "reasoning": "Brief explanation in English",
-    "domain": null,
-    "keywords": [],
-    "likely_articles": [],
-    "reply": "Your intelligent, helpful response in ARABIC here, acting as Mueen."
-}
-
-# CRITICAL RULES:
-- The "reply" field MUST ALWAYS BE IN ARABIC.
-- Do NOT make up laws or articles. If unsure, return an empty array [].
-- Requests to analyze attached documents ALWAYS count as "legal_query".
-- Output ONLY valid JSON, without any markdown formatting like ```json.
+    # CRITICAL RULES:
+    - The "reply" field MUST ALWAYS BE IN ARABIC.
+    - Output ONLY valid JSON, no markdown formatting.
     """
-
-    def __init__(self, llm_service: LLMServiceInterface) -> None:
+    def __init__(self, llm_service: LLMServiceInterface=None) -> None:
         """
         Initialize the intent classifier.
 
         Args:
             llm_service: The LLM service to use for classification
         """
-        self._llm_service = llm_service
+        #self._llm_service = llm_service
+        settings = get_settings()
+        self._fast_llm = ChatGroq(
+            api_key=settings.GROQ_API_KEY,
+            model_name=getattr(settings, "INTENT_MODEL", "llama-3.1-8b-instant"),
+            temperature=0.0, 
+            max_tokens=150, 
+        )
 
     async def classify(self, message: str, history: str = "") -> IntentClassificationResult:
         """
@@ -136,21 +143,18 @@ For "chitchat", "vague", or "out_of_scope":
             ValueError: If LLM response is invalid or unparseable
         """
         logger.debug("classifying_intent", message_preview=message[:100])
-
         prompt = self._build_classification_prompt(message, history)
-        request = LLMRequest(
-            prompt=prompt,
-            system_prompt=self._SYSTEM_PROMPT,
-            temperature=0.2,  # Low temperature for consistent classification
-        )
-
+        messages = [
+            SystemMessage(content=self._SYSTEM_PROMPT),
+            HumanMessage(content=prompt)
+                   ]
         try:
-            response = await self._llm_service.generate(request)
-            result = self._parse_classification_response(response.content, history)
+            response = await self._fast_llm.ainvoke(messages)
+            content_text = response.content
+            result = self._parse_classification_response(content_text, history)
             logger.debug(
                 "classified",
                 intent=result.intent.value,
-                confidence=result.confidence,
             )
             return result
         except ValueError as e:
@@ -197,7 +201,6 @@ For "chitchat", "vague", or "out_of_scope":
         try:
             json_start = response_text.find("{")
             json_end = response_text.rfind("}") + 1
-
             if json_start == -1 or json_end <= json_start:
                 raise ValueError("No JSON found in response")
 
@@ -206,51 +209,27 @@ For "chitchat", "vague", or "out_of_scope":
 
             intent_str = data.get("intent", "").lower()
             if intent_str not in [e.value for e in Intent]:
-                raise ValueError(f"Invalid intent: {intent_str}")
+                intent_str = "legal_query" # Fallback safe
 
             intent = Intent(intent_str)
-
-            raw_confidence = float(data.get("confidence", 0.5))
-            if raw_confidence < 0.0 or raw_confidence > 1.0:
-                logger.warning("confidence_out_of_range", raw_value=raw_confidence, intent=intent_str)
-            confidence = max(0.0, min(1.0, raw_confidence))
-
-            reasoning = str(data.get("reasoning", "")).strip() or f"تم تصنيف الرسالة كـ {intent.value}"
-
-            clarification = data.get("suggested_clarification")
-            clarification = None if clarification in ["null", None] else str(clarification).strip()
-
             reply = data.get("reply")
             reply = None if reply in ["null", None, ""] else str(reply).strip()
 
-            domain = None
-            keywords = []
-            likely_articles = []
+            # استخراج الدومين والكلمات المفتاحية
+            domain = data.get("domain")
+            domain = None if domain in ["null", None, ""] else domain
 
-            if intent == Intent.LEGAL_QUERY:
-                domain = data.get("domain")
-                domain = None if domain in ["null", None, ""] else domain
-
-                keywords = data.get("keywords", [])
-                keywords = [str(k).strip() for k in keywords if k] if isinstance(keywords, list) else []
-
-                likely_articles = data.get("likely_articles", [])
-                likely_articles = [str(a).strip() for a in likely_articles if a] if isinstance(likely_articles, list) else []
-                original_likely_articles = likely_articles
-                likely_articles = [a for a in likely_articles if re.fullmatch(r"\d+", a)]
-
-                dropped_articles = sorted(set(original_likely_articles) - set(likely_articles))
-                if dropped_articles:
-                    logger.warning("likely_articles_filtered", dropped=dropped_articles)
+            keywords = data.get("keywords", [])
+            keywords = [str(k).strip() for k in keywords if k] if isinstance(keywords, list) else []
 
             return IntentClassificationResult(
                 intent=intent,
-                confidence=confidence,
-                reasoning=reasoning,
-                suggested_clarification=clarification,
-                domain=domain,
-                keywords=keywords,
-                likely_articles=likely_articles,
+                confidence=1.0,
+                reasoning="Fast Groq Classification",
+                suggested_clarification=None,
+                domain=domain,          # تم الإضافة
+                keywords=keywords,      # تم الإضافة
+                likely_articles=[],     # لغيناها عشان السرعة
                 reply=reply,
                 history=history,
             )
