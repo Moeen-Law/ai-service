@@ -66,11 +66,25 @@ class SemanticCacheService(CacheServiceInterface):
             best_match = hits[0]
             redis_key = best_match.payload.get("redis_key")
 
-            logger.info(f"semantic_cache_hit [{self._namespace}] for query: {key}")
+            if not redis_key:
+                logger.info(f"semantic_cache_qdrant_hit_but_no_redis_key [{self._namespace}] for query: {key}")
+                return None
 
-            if redis_key:
-                return await self._redis.get(redis_key)
-            return None
+            result = await self._redis.get(redis_key)
+            if result is None:
+                logger.info(f"semantic_cache_qdrant_hit_but_redis_expired [{self._namespace}] for query: {key}")
+                try:
+                    self._qdrant.delete(
+                        collection_name=self._collection_name,
+                        points_selector=models.PointIdsList(points=[best_match.id]),
+                    )
+                    logger.info(f"semantic_cache_qdrant_vector_deleted [{self._namespace}] id: {best_match.id}")
+                except Exception as del_exc:
+                    logger.warning(f"semantic_cache_qdrant_delete_failed [{self._namespace}]: {del_exc}")
+                return None
+
+            logger.info(f"semantic_cache_hit [{self._namespace}] for query: {key}")
+            return result
         except Exception as e:
             logger.warning(f"Semantic Cache GET failed: {e}")
             return None
@@ -78,6 +92,9 @@ class SemanticCacheService(CacheServiceInterface):
     async def set(self, key: str, value: Dict[str, Any], ttl_seconds: int = 2592000) -> None:
         try:
             clean_query = key.strip().lower()
+            if len(key.split()) < 3:
+                logger.info(f"Skipping cache for short query: {key}")
+                return
             query_hash = hashlib.sha256(clean_query.encode('utf-8')).hexdigest()
 
             # redis key depends on the namespace

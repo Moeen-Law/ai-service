@@ -68,7 +68,9 @@ class Settings(BaseSettings):
     # --- AI / LLM Configuration ---
     GEMINI_API_KEYS: str = ""
     GEMINI_API_KEY: str = ""
-    LLM_MODEL: str = "gemini-2.5-flash"
+    LLM_MODEL: str
+    INTENT_MODEL: str = "llama-3.1-8b-instant"
+    GROQ_API_KEY: str = ""
     LLM_TEMPERATURE: float = 0.0
     LLM_REQUEST_TIMEOUT_SECONDS: int = 30
     LLM_MAX_RETRIES: int = 2

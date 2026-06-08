@@ -33,7 +33,7 @@ class RedisCacheService(CacheServiceInterface):
             logger.warning(f"Redis get failed for key {key}: {e}")
             return None
 
-    async def set(self, key: str, value: Dict[str, Any], ttl_seconds: int = 86400) -> None:
+    async def set(self, key: str, value: Dict[str, Any], ttl_seconds: int = 2592000) -> None:
         try:
             data_str = json.dumps(value, ensure_ascii=False)
             await self._client.setex(name=key, time=ttl_seconds, value=data_str)

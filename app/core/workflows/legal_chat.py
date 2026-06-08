@@ -33,6 +33,7 @@ from app.interfaces.external.file_generation_service import (
     FileGenerationServiceInterface,
 )
 from app.interfaces.external.file_service import ExternalFileServiceInterface
+from app.interfaces.external.cache_service import CacheServiceInterface
 from app.shared.errors.exceptions import (
     FileExtractionError,
     FileGenerationError,
@@ -93,6 +94,7 @@ class LegalChatWorkflow(BaseWorkflow):
         file_text_extractor: Optional[FileTextExtractor] = None,
         file_generation_service: Optional[FileGenerationServiceInterface] = None,
         max_frontend_sources: int = 7,
+        semantic_cache: Optional[CacheServiceInterface] = None,
     ) -> None:
         self._rag = rag_service
         self._llm = llm_service
@@ -107,6 +109,7 @@ class LegalChatWorkflow(BaseWorkflow):
         self._file_text_extractor = file_text_extractor or FileTextExtractor()
         self._file_generation_service = file_generation_service
         self._max_sources = max_frontend_sources
+        self._semantic_cache = semantic_cache
 
         workflow = StateGraph(LegalChatState)
         workflow.add_node("classify_intent", self.classify_intent_node)
@@ -671,20 +674,71 @@ class LegalChatWorkflow(BaseWorkflow):
                     details={"field": "file_service"},
                 )
 
-            # 1) Intent classification
-            formatted_history = self._format_conversation_history(conversation_history or [])
-            intent_result = await self._intent_classifier.classify(question, history=formatted_history)
-            logger.info(f"Intent classification result: {intent_result.intent.value} (confidence: {intent_result.confidence}, reasoning: {intent_result.reasoning})")
+            # ---------------------------------------------------------
+            # 1) Semantic Cache 
+            # ---------------------------------------------------------
+            if not normalized_files_ids and self._semantic_cache is not None:
+                cached = await self._semantic_cache.get(question)
+                if cached:
+                    logger.info("legal_chat_semantic_cache_hit", question=question[:80])
+                    cached_answer = cached.get("answer", "")
+                    cached_sources = cached.get("sources", [])
+
+                    words = cached_answer.split(" ")
+                    for i, word in enumerate(words):
+                        chunk = word + " " if i < len(words) - 1 else word
+                        yield self._format_sse_data(
+                            json.dumps({"type": "token", "content": chunk}, ensure_ascii=False)
+                        )
+                        await asyncio.sleep(0)
+
+                    t_done = time.perf_counter()
+                    yield self._format_sse_data(
+                        json.dumps({
+                            "type": "sources",
+                            "sources": cached_sources,
+                            "timing": {"retrieval_ms": 0, "total_ms": round((t_done - t_start) * 1000, 1)},
+                            "intent": Intent.LEGAL_QUERY.value,
+                        }, ensure_ascii=False)
+                    )
+                    yield self._format_sse_data("[DONE]")
+                    return
+
+            # ---------------------------------------------------------
+            # 2) Concurrent Execution: Intent Classification + RAG Retrieval
+            # ---------------------------------------------------------
+            short_history = self._format_conversation_history(conversation_history, limit=2)
+            
+            intent_result = await self._intent_classifier.classify(question, history=short_history)
+            rag_task = asyncio.create_task(
+                self._pipeline.run(
+                    question=question,
+                    retrieval_k=retrieval_k,
+                    precomputed_domain=intent_result.domain,    
+                    precomputed_keywords=intent_result.keywords, 
+                    precomputed_articles=[],
+                    skip_rewrite=True, #
+                )
+            )
+            
+            pipeline_result = await rag_task
+            t_retrieval = time.perf_counter() 
+            
+            logger.info(f"Intent result: {intent_result.intent.value}")  
+            
             if normalized_files_ids and intent_result.intent != Intent.LEGAL_QUERY:
                 intent_result = IntentClassificationResult(
                     intent=Intent.LEGAL_QUERY,
                     confidence=1.0,
-                    domain=intent_result.domain,
+                    domain=None,
                     keywords=intent_result.keywords,
                     likely_articles=intent_result.likely_articles,
                     reasoning="Overridden: uploaded files present",
                 )
 
+            # ---------------------------------------------------------
+            # 3) Handle Chitchat/Vague 
+            # ---------------------------------------------------------
             if intent_result.intent != Intent.LEGAL_QUERY:
                 reply_text = getattr(intent_result, 'reply', None)
                 if not reply_text:
@@ -722,22 +776,13 @@ class LegalChatWorkflow(BaseWorkflow):
                 yield self._format_sse_data("[DONE]")
                 return
 
-            # 2) Full Pipeline for LEGAL_QUERY
+            # ---------------------------------------------------------
+            # 4) Full Pipeline for LEGAL_QUERY 
+            # ---------------------------------------------------------
             # a) File Extraction
             uploaded_context = None
             if normalized_files_ids:
                 uploaded_context = await self._build_uploaded_files_context(normalized_files_ids)
-
-            # b) RAG Pipeline
-            pipeline_result = await self._pipeline.run(
-                question=question,
-                retrieval_k=retrieval_k,
-                precomputed_domain=intent_result.domain,
-                precomputed_keywords=intent_result.keywords,
-                precomputed_articles=intent_result.likely_articles,
-                skip_rewrite=True,
-            )
-            t_retrieval = time.perf_counter()
 
             # c) Merge Contexts
             merged_context = ""
@@ -838,6 +883,13 @@ class LegalChatWorkflow(BaseWorkflow):
                     frontend_sources = cited[: self._max_sources]
                 if not frontend_sources:
                     final_intent = Intent.LEGAL_QUERY.value
+
+                # Save to semantic cache — only for file-free queries
+                if not normalized_files_ids and self._semantic_cache is not None and complete_answer:
+                    await self._semantic_cache.set(question, {
+                        "answer": complete_answer,
+                        "sources": frontend_sources,
+                    })
 
             timing = {
                 "retrieval_ms": round((t_retrieval - t_start) * 1000, 1),

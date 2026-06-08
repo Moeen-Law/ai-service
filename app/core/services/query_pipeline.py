@@ -97,8 +97,8 @@ class QueryPipeline:
         pipeline_start = time.time()
         # 0. LLM query rewriting — skip if precomputed or explicitly requested
         rewrite_start = time.time()
-        if skip_rewrite or precomputed_domain is not None or precomputed_keywords:
-            # Use precomputed rewrite data (from IntentClassifier)
+        if skip_rewrite:
+            # Use precomputed data from IntentClassifier
             llm_domain: Optional[str] = precomputed_domain
             llm_keywords: List[str] = precomputed_keywords or []
             llm_articles: List[str] = precomputed_articles or []
@@ -109,12 +109,12 @@ class QueryPipeline:
                 articles=llm_articles,
             )
         else:
-            # Full LLM query rewriting
+            # Fallback: full LLM query rewriting (when IntentClassifier didn't produce usable data)
             rewrite = await self._rewrite_legal_query(question)
             llm_domain: Optional[str] = rewrite.get("domain")
             llm_keywords: List[str] = rewrite.get("keywords", [])
             llm_articles: List[str] = rewrite.get("likely_articles", [])
-        logger.info(f"[Pipeline TIME] Step 0 (LLM Rewrite) took {time.time() - rewrite_start:.4f} seconds")
+            logger.info(f"[Pipeline TIME] Step 0 (LLM Rewrite) took {time.time() - rewrite_start:.4f} seconds")
         expanded_query = " ".join(llm_keywords) if llm_keywords else question
 
         # 1. Domain detection
@@ -123,9 +123,10 @@ class QueryPipeline:
             preferred_domain = llm_domain
         else:
             preferred_domain = self._rag.detect_domain_semantic(question)
+            logger.info(f"[Pipeline TIME] Step 1 (Domain Detection) took {time.time() - domain_start:.4f} seconds")
+
 
         logger.info("pipeline_domain", domain=preferred_domain)
-        logger.info(f"[Pipeline TIME] Step 1 (Domain Detection) took {time.time() - domain_start:.4f} seconds")
         # 1b. Merge article numbers
         question_numbers = extract_article_numbers_from_text(question)
         for art in llm_articles:
@@ -253,15 +254,15 @@ class QueryPipeline:
 
             resp = await self._llm.generate(LLMRequest(prompt=prompt))
             raw = resp.content.strip()
-            
+
             # Remove markdown code blocks (with or without language specifier)
             raw = re.sub(r"```(?:json)?\s*", "", raw)
-            
+
             # Extract JSON object if wrapped in extra text
             json_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", raw)
             if json_match:
                 raw = json_match.group(0)
-            
+
             raw = raw.strip()
 
             parsed = json.loads(raw)

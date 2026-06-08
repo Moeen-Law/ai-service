@@ -36,6 +36,7 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
     llm_service = get_llm_service()
     search_service = get_search_service()
     # Register each workflow for its corresponding task type
+    legal_chat_cache = get_semantic_cache_service(namespace="legal_chat")
     reg.register(
         TaskType.LEGAL_CHAT,
         LegalChatWorkflow(
@@ -44,6 +45,7 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
             prompt_service,
             file_service,
             file_generation_service=file_generation_service,
+            semantic_cache=legal_chat_cache,
         ),
     )
     reg.register(
