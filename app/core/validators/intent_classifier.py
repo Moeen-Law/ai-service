@@ -84,7 +84,7 @@ class IntentClassifier:
 
     # LEGAL DOMAINS:
     You MUST choose ONLY ONE of the following or null:
-    ["penal", "criminal_procedure", "civil", "labor", "constitution", "commercial"]
+    ["penal", "criminal_procedure", "civil", "labor", "constitution"]
 
     # ARTICLE PREDICTION RULES (CRITICAL):
     - In "likely_articles", recall from your knowledge base the exact article numbers from the matching Egyptian Code.
@@ -133,7 +133,7 @@ class IntentClassifier:
             api_key=settings.GROQ_API_KEY,
             model_name=getattr(settings, "INTENT_MODEL", "llama-3.1-8b-instant"),
             temperature=0.0, 
-            max_tokens=200, 
+            max_tokens=300, 
         )
 
     async def classify(self, message: str, history: str = "") -> IntentClassificationResult:
@@ -223,7 +223,6 @@ class IntentClassifier:
             reply = data.get("reply")
             reply = None if reply in ["null", None, ""] else str(reply).strip()
 
-            # استخراج الدومين والكلمات المفتاحية
             domain = data.get("domain")
             domain = None if domain in ["null", None, ""] else domain
 
