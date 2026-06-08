@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEYS: str = ""
     GEMINI_API_KEY: str = ""
     LLM_MODEL: str
-    INTENT_MODEL: str = "llama-3.1-8b-instant"
+    INTENT_MODEL: str
     GROQ_API_KEY: str = ""
     LLM_TEMPERATURE: float = 0.0
     LLM_REQUEST_TIMEOUT_SECONDS: int = 30

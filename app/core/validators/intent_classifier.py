@@ -72,7 +72,7 @@ class IntentClassifier:
     # INSTRUCTIONS:
     1. Identify the intent of the LATEST user message.
     2. If it is "legal_query", extract the domain, Arabic keywords, and PREDICT the exact Egyptian law article numbers related to the situation.
-    3. If it is NOT a "legal_query", generate a direct Arabic response acting as Mueen in the "reply" field.
+    3. If it is "chitchat", "vague", or "out_of_scope", you MUST generate a direct response acting as Mueen in the "reply" field. The "reply" MUST be in Arabic.
     4. CRITICAL: For crime-related stories (fights, murder, self-defense, theft, etc.), the domain MUST be "penal".
     
     # INTENT CATEGORIES:
@@ -80,6 +80,7 @@ class IntentClassifier:
     - "chitchat": Greetings, thanks, or casual talk.
     - "vague": A legal query that is too broad and needs clarification.
     - "out_of_scope": Topics completely unrelated to law.
+    
 
     # LEGAL DOMAINS:
     You MUST choose ONLY ONE of the following or null:

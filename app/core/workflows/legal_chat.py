@@ -710,20 +710,7 @@ class LegalChatWorkflow(BaseWorkflow):
             short_history = self._format_conversation_history(conversation_history, limit=2)
             
             intent_result = await self._intent_classifier.classify(question, history=short_history)
-            rag_task = asyncio.create_task(
-                self._pipeline.run(
-                    question=question,
-                    retrieval_k=retrieval_k,
-                    precomputed_domain=intent_result.domain,    
-                    precomputed_keywords=intent_result.keywords, 
-                    precomputed_articles=[],
-                    skip_rewrite=True, #
-                )
-            )
-            
-            pipeline_result = await rag_task
-            t_retrieval = time.perf_counter() 
-            
+                        
             logger.info(f"Intent result: {intent_result.intent.value}")  
             
             if normalized_files_ids and intent_result.intent != Intent.LEGAL_QUERY:
@@ -779,6 +766,17 @@ class LegalChatWorkflow(BaseWorkflow):
             # ---------------------------------------------------------
             # 4) Full Pipeline for LEGAL_QUERY 
             # ---------------------------------------------------------
+            logger.info("Legal query confirmed. Executing RAG Pipeline.")
+            t_retrieval_start = time.perf_counter()
+            pipeline_result = await self._pipeline.run(
+                question=question,
+                retrieval_k=retrieval_k,
+                precomputed_domain=intent_result.domain,    
+                precomputed_keywords=intent_result.keywords, 
+                precomputed_articles=intent_result.likely_articles, 
+                skip_rewrite=True, 
+            )
+            t_retrieval = time.perf_counter()
             # a) File Extraction
             uploaded_context = None
             if normalized_files_ids:
@@ -892,7 +890,7 @@ class LegalChatWorkflow(BaseWorkflow):
                     })
 
             timing = {
-                "retrieval_ms": round((t_retrieval - t_start) * 1000, 1),
+                "retrieval_ms": round((t_retrieval - t_retrieval_start) * 1000, 1),
                 "total_ms": round((t_done - t_start) * 1000, 1),
             }
 
