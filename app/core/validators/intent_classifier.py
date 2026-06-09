@@ -127,14 +127,15 @@ class IntentClassifier:
         Args:
             llm_service: The LLM service to use for classification
         """
-        #self._llm_service = llm_service
+        self._llm_service = llm_service
         settings = get_settings()
-        self._fast_llm = ChatGroq(
-            api_key=settings.GROQ_API_KEY,
-            model_name=getattr(settings, "INTENT_MODEL", "llama-3.1-8b-instant"),
-            temperature=0.0, 
-            max_tokens=300, 
-        )
+
+        # self._fast_llm = ChatGroq(
+        #     api_key=settings.GROQ_API_KEY,
+        #     model_name=getattr(settings, "INTENT_MODEL", "llama-3.1-8b-instant"),
+        #     temperature=0.0, 
+        #     max_tokens=300, 
+        # )
 
     async def classify(self, message: str, history: str = "") -> IntentClassificationResult:
         """
@@ -152,14 +153,20 @@ class IntentClassifier:
         """
         logger.debug("classifying_intent", message_preview=message[:100])
         prompt = self._build_classification_prompt(message, history)
-        messages = [
-            SystemMessage(content=self._SYSTEM_PROMPT),
-            HumanMessage(content=prompt)
-                   ]
+        request = LLMRequest(
+            prompt=prompt,
+            system_prompt=self._SYSTEM_PROMPT,
+            temperature=0.2,  # Low temperature for consistent classification
+        )
+        # messages = [
+        #     SystemMessage(content=self._SYSTEM_PROMPT),
+        #     HumanMessage(content=prompt)
+        #            ]
         try:
-            response = await self._fast_llm.ainvoke(messages)
-            content_text = response.content
-            result = self._parse_classification_response(content_text, history)
+            # response = await self._fast_llm.ainvoke(messages)
+            # content_text = response.content
+            response = await self._llm_service.generate(request)
+            result = self._parse_classification_response(response.content, history)
             logger.debug(
                 "classified",
                 intent=result.intent.value,
