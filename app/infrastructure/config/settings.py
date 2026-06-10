@@ -6,6 +6,7 @@ All settings are loaded from environment variables or .env file.
 """
 
 from functools import lru_cache
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -34,7 +35,7 @@ class Settings(BaseSettings):
     # Server Configuration
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-    DEBUG: bool = False
+    DEBUG: bool = True
 
     # Logging
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
@@ -96,6 +97,11 @@ class Settings(BaseSettings):
     REDIS_URL: str = ""
 
     TAVILY_API_KEY: str = ""
+    LANGCHAIN_TRACING_V2: bool = True
+    LANGCHAIN_ENDPOINT: str = "https://api.smith.langchain.com"
+    LANGCHAIN_API_KEY: str
+    LANGCHAIN_PROJECT: str = "Mueen-Legal-AI"
+
     @property
     def is_development(self) -> bool:
         """Check if running in development mode."""
@@ -114,4 +120,9 @@ def get_settings() -> Settings:
 
     Uses LRU cache to ensure settings are only loaded once.
     """
-    return Settings()
+    settings = Settings()
+    os.environ["LANGCHAIN_TRACING_V2"] = str(settings.LANGCHAIN_TRACING_V2).lower()
+    os.environ["LANGCHAIN_ENDPOINT"] = settings.LANGCHAIN_ENDPOINT
+    os.environ["LANGCHAIN_API_KEY"] = settings.LANGCHAIN_API_KEY
+    os.environ["LANGCHAIN_PROJECT"] = settings.LANGCHAIN_PROJECT
+    return settings

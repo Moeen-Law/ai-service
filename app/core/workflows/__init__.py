@@ -13,7 +13,6 @@ from app.core.workflows.legal_chat import LegalChatWorkflow
 from app.core.workflows.terminology import TerminologyWorkflow
 from app.core.workflows.registry import WorkflowRegistry, workflow_registry
 from app.infrastructure.adapters import (
-    file_generation_service,
     file_service,
     get_llm_service,
     get_search_service,
@@ -44,7 +43,6 @@ def register_all_workflows(registry: WorkflowRegistry | None = None) -> None:
             llm_service,
             prompt_service,
             file_service,
-            file_generation_service=file_generation_service,
             semantic_cache=legal_chat_cache,
         ),
     )

@@ -11,13 +11,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
-
 from app.core.domain.enums import Intent
 from app.infrastructure.logging.logger import get_logger
-from app.infrastructure.config.settings import get_settings
 from app.interfaces.ai.llm_service import LLMRequest, LLMServiceInterface
-from langchain_groq import ChatGroq
 
 logger = get_logger(__name__)
 
@@ -64,6 +60,19 @@ class IntentClassifier:
     - OUT_OF_SCOPE → Polite redirect
     """
 
+    _DOCUMENT_GENERATION_TRIGGERS = (
+        "إنشاء عقد",
+        "كتابة عقد",
+        "صياغة عقد",
+        "إنشاء مذكرة",
+        "إنشاء صحيفة دعوى",
+        "إنشاء مستند قانوني",
+    )
+    _DOCUMENT_GENERATION_REPLY = (
+        "هذه الخدمة مخصصة للاستشارات القانونية وتحليل الملفات فقط. "
+        "لإنشاء المستندات القانونية استخدم خدمة إنشاء المستندات."
+    )
+
     # System prompt for intent classification + query rewriting (Arabic-first)
     _SYSTEM_PROMPT = """
     You are "Mueen" (معين), an expert Egyptian legal knowledge extractor and intent classifier.
@@ -74,7 +83,17 @@ class IntentClassifier:
     2. If it is "legal_query", extract the domain, Arabic keywords, and PREDICT the exact Egyptian law article numbers related to the situation.
     3. If it is "chitchat", "vague", or "out_of_scope", you MUST generate a direct response acting as Mueen in the "reply" field. The "reply" MUST be in Arabic.
     4. CRITICAL: For crime-related stories (fights, murder, self-defense, theft, etc.), the domain MUST be "penal".
-    
+    5. If the user requests any of the following:
+        - إنشاء عقد
+        - كتابة عقد
+        - صياغة عقد
+        - إنشاء مذكرة
+        - إنشاء صحيفة دعوى
+        - إنشاء مستند قانوني
+
+    Classify as OUT_OF_SCOPE and set reply exactly to:
+    "هذه الخدمة مخصصة للاستشارات القانونية وتحليل الملفات فقط. لإنشاء المستندات القانونية استخدم خدمة إنشاء المستندات."
+
     # INTENT CATEGORIES:
     - "legal_query": Questions about Egyptian law, contracts, or document analysis.
     - "chitchat": Greetings, thanks, or casual talk.
@@ -128,14 +147,6 @@ class IntentClassifier:
             llm_service: The LLM service to use for classification
         """
         self._llm_service = llm_service
-        settings = get_settings()
-
-        # self._fast_llm = ChatGroq(
-        #     api_key=settings.GROQ_API_KEY,
-        #     model_name=getattr(settings, "INTENT_MODEL", "llama-3.1-8b-instant"),
-        #     temperature=0.0, 
-        #     max_tokens=300, 
-        # )
 
     async def classify(self, message: str, history: str = "") -> IntentClassificationResult:
         """
@@ -152,19 +163,20 @@ class IntentClassifier:
             ValueError: If LLM response is invalid or unparseable
         """
         logger.debug("classifying_intent", message_preview=message[:100])
+        document_generation_result = self._classify_document_generation_request(
+            message=message,
+            history=history,
+        )
+        if document_generation_result is not None:
+            return document_generation_result
+
         prompt = self._build_classification_prompt(message, history)
         request = LLMRequest(
             prompt=prompt,
             system_prompt=self._SYSTEM_PROMPT,
             temperature=0.2,  # Low temperature for consistent classification
         )
-        # messages = [
-        #     SystemMessage(content=self._SYSTEM_PROMPT),
-        #     HumanMessage(content=prompt)
-        #            ]
         try:
-            # response = await self._fast_llm.ainvoke(messages)
-            # content_text = response.content
             response = await self._llm_service.generate(request)
             result = self._parse_classification_response(response.content, history)
             logger.debug(
@@ -183,6 +195,26 @@ class IntentClassifier:
         except Exception as e:
             logger.error("classification_failed", error=str(e))
             raise
+
+    def _classify_document_generation_request(
+        self,
+        message: str,
+        history: str,
+    ) -> Optional[IntentClassificationResult]:
+        normalized_message = re.sub(r"\s+", " ", message or "").strip()
+        if not any(trigger in normalized_message for trigger in self._DOCUMENT_GENERATION_TRIGGERS):
+            return None
+
+        return IntentClassificationResult(
+            intent=Intent.OUT_OF_SCOPE,
+            confidence=1.0,
+            reasoning="Document generation request is outside legal chat scope",
+            domain=None,
+            keywords=[],
+            likely_articles=[],
+            reply=self._DOCUMENT_GENERATION_REPLY,
+            history=history,
+        )
 
     def _build_classification_prompt(self, message: str, history: str) -> str:
         """
