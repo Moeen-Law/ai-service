@@ -2,7 +2,10 @@
 Legal Chat Workflow
 
 Full-pipeline workflow for conversational legal queries.
-Uses intent classification, hybrid RAG retrieval, LLM query-rewriting, and SSE streaming.
+Uses intent classification, uploaded-file extraction, hybrid RAG retrieval, and SSE
+streaming. When files are uploaded the workflow follows "File Content First, RAG
+Second": uploaded file content is the primary source of truth, while RAG provides
+supporting legal grounding, validation, and references.
 
 Graph runs for BOTH execute() and stream():
   - execute()  → graph.ainvoke()   → returns full Result
@@ -50,6 +53,7 @@ class LegalChatState(TypedDict, total=False):
     # ── inputs ──
     message: str
     files_ids: List[str]
+    analysis_mode: str
     jurisdiction: str
     language: str
     retrieval_k: int
@@ -59,6 +63,7 @@ class LegalChatState(TypedDict, total=False):
     intent_result: Optional[IntentClassificationResult]
     pipeline_result: Optional[PipelineResult]
     uploaded_files_context: Optional[str]
+    retrieval_query: Optional[str]
     assembled_prompt: Optional[str]
     system_prompt: Optional[str]
     tools: Optional[List[Any]]
@@ -87,6 +92,12 @@ class LegalChatWorkflow(BaseWorkflow):
           fetch_files → run_rag_pipeline → merge_context →
           assemble_prompt → build_tools → llm_generate →
           filter_sources → END
+
+    Modes:
+    - standard_legal_qa: RAG-first legal Q&A for normal questions.
+    - file_legal_analysis: File Content First, RAG Second. Uploaded file content is
+      placed first in the final context and RAG still runs with an enriched query
+      derived from the question plus high-level file context.
     """
 
     def __init__(
@@ -166,6 +177,7 @@ class LegalChatWorkflow(BaseWorkflow):
         state = LegalChatState(
             message=payload.get("message", ""),
             files_ids=files_ids,
+            analysis_mode=self._resolve_analysis_mode(files_ids),
             jurisdiction=context.jurisdiction.value,
             language=context.language.value,
             retrieval_k=payload.get("retrieval_k", 4),
@@ -234,6 +246,7 @@ class LegalChatWorkflow(BaseWorkflow):
             state = LegalChatState(
                 message=question,
                 files_ids=normalized_files_ids,
+                analysis_mode=self._resolve_analysis_mode(normalized_files_ids),
                 jurisdiction=jurisdiction,
                 language=language,
                 retrieval_k=retrieval_k,
@@ -403,15 +416,27 @@ class LegalChatWorkflow(BaseWorkflow):
 
     async def _node_run_rag_pipeline(self, state: LegalChatState) -> Dict[str, Any]:
         intent_result = state.get("intent_result")
-        pipeline_result = await self._pipeline.run(
+        analysis_mode = state.get("analysis_mode", "standard_legal_qa")
+        retrieval_query = self._build_retrieval_query(
             question=state.get("message", ""),
+            uploaded_files_context=state.get("uploaded_files_context") or "",
+            analysis_mode=analysis_mode,
+        )
+        pipeline_result = await self._pipeline.run(
+            question=retrieval_query,
             retrieval_k=state.get("retrieval_k", 4),
             precomputed_domain=intent_result.domain if intent_result else None,
-            precomputed_keywords=intent_result.keywords if intent_result else [],
+            precomputed_keywords=(
+                [] if analysis_mode == "file_legal_analysis"
+                else intent_result.keywords if intent_result else []
+            ),
             precomputed_articles=intent_result.likely_articles if intent_result else [],
-            skip_rewrite=True,
+            skip_rewrite=analysis_mode != "file_legal_analysis",
         )
-        return {"pipeline_result": pipeline_result}
+        return {
+            "pipeline_result": pipeline_result,
+            "retrieval_query": retrieval_query,
+        }
 
     async def _node_merge_context(self, state: LegalChatState) -> Dict[str, Any]:
         pipeline_result   = state.get("pipeline_result")
@@ -419,7 +444,10 @@ class LegalChatWorkflow(BaseWorkflow):
         if uploaded_context and pipeline_result:
             pipeline_result = replace(
                 pipeline_result,
-                context=self._merge_contexts(pipeline_result.context, uploaded_context),
+                context=self._merge_contexts(
+                    legal_context=pipeline_result.context,
+                    uploaded_files_context=uploaded_context,
+                ),
             )
         return {"pipeline_result": pipeline_result}
 
@@ -430,6 +458,7 @@ class LegalChatWorkflow(BaseWorkflow):
             jurisdiction=state.get("jurisdiction", "egypt"),
             language=state.get("language", "ar"),
         )
+        analysis_mode = state.get("analysis_mode", "standard_legal_qa")
         assembled = await self._prompt.assemble_prompt(
             template=template,
             variables={
@@ -440,16 +469,23 @@ class LegalChatWorkflow(BaseWorkflow):
                 ),
             },
         )
+        prompt = assembled.prompt
+        if analysis_mode == "file_legal_analysis":
+            prompt = self._add_file_analysis_instructions(prompt)
         return {
-            "assembled_prompt": assembled.prompt,
+            "assembled_prompt": prompt,
             "system_prompt":    assembled.system_prompt,
         }
 
     async def _node_build_tools(self, state: LegalChatState) -> Dict[str, Any]:
         files_ids         = state.get("files_ids", [])
+        analysis_mode     = state.get("analysis_mode", "standard_legal_qa")
         base_system       = state.get("system_prompt", "")
         tools             = self._build_agent_tools(files_ids=files_ids)
-        agent_instructions = self._build_agent_system_prompt(files_ids=files_ids)
+        agent_instructions = self._build_agent_system_prompt(
+            files_ids=files_ids,
+            analysis_mode=analysis_mode,
+        )
 
         # Only append tool instructions when tools are actually present
         if tools:
@@ -538,6 +574,7 @@ class LegalChatWorkflow(BaseWorkflow):
             "message": answer,
             "sources": frontend_sources,
             "intent":  intent_val,
+            "analysis_mode": state.get("analysis_mode", "standard_legal_qa"),
         }
 
         return {"final_output": result_data}
@@ -618,8 +655,8 @@ class LegalChatWorkflow(BaseWorkflow):
         return [get_uploaded_files_content]
 
     @staticmethod
-    def _build_agent_system_prompt(files_ids: List[str]) -> str:
-        return (
+    def _build_agent_system_prompt(files_ids: List[str], analysis_mode: str) -> str:
+        base = (
             "أنت مساعد قانوني مصري.\n"
             "مهمتك فقط:\n\n"
             "1. الإجابة على الأسئلة القانونية.\n"
@@ -627,6 +664,14 @@ class LegalChatWorkflow(BaseWorkflow):
             "لا تنشئ عقوداً أو مذكرات أو صحف دعاوى أو مستندات قانونية.\n"
             "إذا طلب المستخدم إنشاء مستند قانوني فأخبره أن خدمة إنشاء المستندات متاحة في قسم مستقل."
         )
+        if files_ids and analysis_mode == "file_legal_analysis":
+            return (
+                f"{base}\n\n"
+                "عند وجود ملفات مرفوعة، اعتبر محتوى الملف هو المصدر الأساسي. "
+                "استخدم المواد القانونية المسترجعة فقط كدعم للتحقق القانوني وذكر المراجع. "
+                "لا تلخص أو تشرح الملف اعتماداً على معرفة عامة خارج السياق."
+            )
+        return base
 
     # Static helpers
     # ─────────────────────────────────────────
@@ -685,10 +730,102 @@ class LegalChatWorkflow(BaseWorkflow):
         uploaded_files_context  = (uploaded_files_context or "").strip()
         if legal_context and uploaded_files_context:
             return (
-                f"المواد القانونية ذات الصلة:\n{legal_context}\n\n"
-                f"محتوى الملفات المرفوعة من المستخدم:\n{uploaded_files_context}"
+                "ترتيب الأولوية للمعلومات:\n"
+                "1. محتوى الملف المرفوع (المصدر الأساسي)\n"
+                "2. المواد القانونية المسترجعة (مصدر داعم)\n"
+                "3. لا تستخدم أي معرفة خارج الـ Context\n\n"
+                "إذا تعارضت المعلومات:\n"
+                "اعتمد على الملف أولاً ثم استخدم المواد القانونية لتفسيره قانونياً.\n\n"
+                f"=== محتوى الملف المرفوع - المصدر الأساسي ===\n{uploaded_files_context}\n\n"
+                f"=== المواد القانونية المسترجعة - مصدر داعم ===\n{legal_context}"
             )
-        return uploaded_files_context or legal_context
+        if uploaded_files_context:
+            return (
+                "ترتيب الأولوية للمعلومات:\n"
+                "1. محتوى الملف المرفوع (المصدر الأساسي)\n"
+                "2. المواد القانونية المسترجعة (مصدر داعم إذا توفرت)\n"
+                "3. لا تستخدم أي معرفة خارج الـ Context\n\n"
+                f"=== محتوى الملف المرفوع - المصدر الأساسي ===\n{uploaded_files_context}"
+            )
+        return legal_context
+
+    @staticmethod
+    def _resolve_analysis_mode(files_ids: List[str]) -> str:
+        return "file_legal_analysis" if files_ids else "standard_legal_qa"
+
+    def _build_retrieval_query(
+        self,
+        question: str,
+        uploaded_files_context: str,
+        analysis_mode: str,
+    ) -> str:
+        question = (question or "").strip()
+        if analysis_mode != "file_legal_analysis":
+            return question
+
+        high_level_context = self._summarize_file_context_for_retrieval(
+            uploaded_files_context
+        )
+        if question and high_level_context:
+            return f"{question}\n\n{high_level_context}"
+        return question or high_level_context or "تحليل قانوني للمستند المرفوع وفق القانون المصري"
+
+    @staticmethod
+    def _summarize_file_context_for_retrieval(uploaded_files_context: str) -> str:
+        text = (uploaded_files_context or "").strip()
+        if not text:
+            return "تحليل قانوني للمستند المرفوع وفق القانون المصري"
+
+        lowered = text.lower()
+        signals: List[str] = []
+
+        contract_terms = ("عقد", "اتفاق", "طرف أول", "طرف ثاني", "التزام", "بند")
+        labor_terms = ("عامل", "صاحب العمل", "أجر", "مرتب", "إجازة", "فصل", "وظيفة")
+        lease_terms = ("إيجار", "مؤجر", "مستأجر", "عين مؤجرة", "أجرة")
+        court_terms = ("محكمة", "دعوى", "قضية", "حكم", "جلسة", "مدعي", "مدعى")
+        company_terms = ("شركة", "تجاري", "أسهم", "شريك", "سجل تجاري")
+
+        if any(term in text for term in contract_terms):
+            signals.append("تحليل عقد")
+        if any(term in text for term in labor_terms):
+            signals.append("عقد عمل وقانون العمل المصري")
+        if any(term in text for term in lease_terms):
+            signals.append("عقد إيجار والقانون المدني المصري")
+        if any(term in text for term in court_terms):
+            signals.append("تحليل مستند قضائي وآثاره القانونية")
+        if any(term in text for term in company_terms):
+            signals.append("مسائل الشركات والمعاملات التجارية")
+        if "filename:" in lowered and ".pdf" in lowered:
+            signals.append("مستند قانوني مرفوع")
+
+        if not signals:
+            signals.append("تحليل قانوني للمستند المرفوع")
+
+        preview = " ".join(text.split())[:700]
+        return (
+            f"{' - '.join(dict.fromkeys(signals))} وفق القانون المصري.\n"
+            f"مقتطف عالي المستوى من الملف لاستخدامه في الاسترجاع فقط: {preview}"
+        )
+
+    @staticmethod
+    def _add_file_analysis_instructions(prompt: str) -> str:
+        return (
+            "=== وضع تحليل ملف قانوني ===\n"
+            "ترتيب الأولوية للمعلومات:\n"
+            "1. محتوى الملف المرفوع (المصدر الأساسي)\n"
+            "2. المواد القانونية المسترجعة (مصدر داعم)\n"
+            "3. لا تستخدم أي معرفة خارج الـ Context\n\n"
+            "إذا تعارضت المعلومات:\n"
+            "اعتمد على الملف أولاً ثم استخدم المواد القانونية لتفسيره قانونياً.\n\n"
+            "في هذا الوضع حلل الملف تلقائياً حتى لو كان سؤال المستخدم عاماً مثل "
+            "\"لخص العقد\" أو \"اشرح الملف\" أو \"راجع المستند\". يجب أن يتضمن الرد "
+            "ما يناسب نوع الملف من: ملخص أو شرح، ملاحظات قانونية مهمة، مشكلات أو "
+            "مخاطر قانونية، تقييم قانونية البنود محل السؤال، ومراجع قانونية داعمة "
+            "إذا كانت موجودة في المواد المسترجعة.\n\n"
+            "ممنوع تلخيص أو شرح الملف باستخدام معرفة عامة. كل جملة يجب أن تكون "
+            "مستندة إلى محتوى الملف أو المواد القانونية المسترجعة.\n\n"
+            f"{prompt}"
+        )
 
     @staticmethod
     def _normalize_file_ids(raw_value: Any) -> List[str]:
