@@ -7,6 +7,7 @@ Supports both single-shot generation and async streaming (SSE) with robust failo
 
 import asyncio
 import json
+import random
 from typing import Any, AsyncIterator, Optional, Sequence
 import time
 
@@ -99,7 +100,6 @@ class GeminiLLMService(LLMServiceInterface):
         self._last_successful_generation_at: Optional[float] = None
 
     async def _get_best_llm_instance(self) -> tuple[ChatGoogleGenerativeAI, str]:
-        """Finds the most available, non-throttled API key under the current runtime constraints."""
         async with self._lock:
             now = time.monotonic()
 
@@ -111,29 +111,51 @@ class GeminiLLMService(LLMServiceInterface):
 
             SAFE_LIMIT_PER_MINUTE = 5
 
-            # Filter keys that are neither rate-saturated nor explicitly benched via 503 circuit-breaking
             available_keys = [
-                k for k in self._api_keys
+                k
+                for k in self._api_keys
                 if self._keys_tracker[k]["requests_count"] < SAFE_LIMIT_PER_MINUTE
-                and now >= self._keys_tracker[k]["benched_until"]
+                   and now >= self._keys_tracker[k]["benched_until"]
             ]
 
             if not available_keys:
-                # If all keys are saturated or cooling down, grab the least utilized key as an absolute fallback
-                selected_key = min(self._api_keys, key=lambda k: self._keys_tracker[k]["requests_count"])
-                logger.warning("all_keys_saturated_forcing_lowest_load", key_index=self._api_keys.index(selected_key))
+                selected_key = min(
+                    self._api_keys,
+                    key=lambda k: self._keys_tracker[k]["requests_count"],
+                )
+
+                logger.warning(
+                    "all_keys_unavailable_using_fallback",
+                    key_index=self._api_keys.index(selected_key),
+                )
             else:
-                selected_key = min(available_keys, key=lambda k: self._keys_tracker[k]["requests_count"])
+                lowest_load = min(
+                    self._keys_tracker[k]["requests_count"]
+                    for k in available_keys
+                )
+
+                candidates = [
+                    k
+                    for k in available_keys
+                    if self._keys_tracker[k]["requests_count"] == lowest_load
+                ]
+
+                selected_key = random.choice(candidates)
 
             self._keys_tracker[selected_key]["requests_count"] += 1
+
             key_index = self._api_keys.index(selected_key)
-            masked_key = f"{selected_key[:4]}...{selected_key[-4:]}" if len(selected_key) > 8 else "invalid_key"
+            masked_key = (
+                f"{selected_key[:4]}...{selected_key[-4:]}"
+                if len(selected_key) > 8
+                else "invalid_key"
+            )
 
             logger.info(
                 "api_key_selected",
                 key_index=key_index,
                 masked_key=masked_key,
-                current_minute_load=self._keys_tracker[selected_key]["requests_count"]
+                current_minute_load=self._keys_tracker[selected_key]["requests_count"],
             )
 
             llm_instance = ChatGoogleGenerativeAI(
@@ -141,18 +163,42 @@ class GeminiLLMService(LLMServiceInterface):
                 temperature=self._temperature,
                 google_api_key=selected_key,
             )
+
             return llm_instance, selected_key
 
-    async def _handle_key_failure(self, key: str, is_server_error: bool = False) -> None:
-        """Helper to clear loads and temporarily bench keys hitting 503/429 limits."""
+    async def _handle_key_failure(
+            self,
+            key: str,
+            error: Optional[Exception] = None,
+            is_server_error: bool = False,
+    ) -> None:
         async with self._lock:
-            if key in self._keys_tracker:
-                if self._keys_tracker[key]["requests_count"] > 0:
-                    self._keys_tracker[key]["requests_count"] -= 1
-                if is_server_error:
-                    # Implement Circuit Breaking: Bench this key for 45 seconds so other operations bypass it
-                    self._keys_tracker[key]["benched_until"] = time.monotonic() + 45.0
-                    logger.warning("key_benched_due_to_throttling", key_index=self._api_keys.index(key), duration=45)
+            if key not in self._keys_tracker:
+                return
+
+            tracker = self._keys_tracker[key]
+
+            if tracker["requests_count"] > 0:
+                tracker["requests_count"] -= 1
+
+            bench_seconds = 45
+
+            error_text = str(error) if error else ""
+
+            if "PerDayPerProject" in error_text or "PerDayPerModel" in error_text:
+                bench_seconds = 86400
+
+            elif is_server_error:
+                bench_seconds = 45
+
+            tracker["benched_until"] = time.monotonic() + bench_seconds
+
+            logger.warning(
+                "key_benched",
+                key_index=self._api_keys.index(key),
+                bench_seconds=bench_seconds,
+                error=error_text[:200],
+            )
 
     # ------------------------------------------------------------------
     # Single-shot generation
@@ -184,12 +230,20 @@ class GeminiLLMService(LLMServiceInterface):
                     finish_reason="stop",
                 )
             except (ServiceUnavailable, ResourceExhausted) as throttling_exc:
-                await self._handle_key_failure(active_key, is_server_error=True)
+                await self._handle_key_failure(
+                    active_key,
+                    error=throttling_exc,
+                    is_server_error=True,
+                )
                 if attempt == attempts - 1:
                     raise throttling_exc
                 await asyncio.sleep(self._retry_base_delay_seconds * (2**attempt))
             except Exception as exc:
-                await self._handle_key_failure(active_key, is_server_error=False)
+                await self._handle_key_failure(
+                    active_key,
+                    error=exc,
+                    is_server_error=False,
+                )
                 if attempt == attempts - 1:
                     logger.error("llm_generate_failed", error=str(exc))
                     raise
@@ -242,13 +296,21 @@ class GeminiLLMService(LLMServiceInterface):
                 return  # Stream finished successfully, break out completely
 
             except (ServiceUnavailable, ResourceExhausted) as throttling_exc:
-                await self._handle_key_failure(active_key, is_server_error=True)
+                await self._handle_key_failure(
+                    active_key,
+                    error=throttling_exc,
+                    is_server_error=True,
+                )
                 logger.warning("astream_key_throttled_switching_key", attempt=attempt+1, key_index=self._api_keys.index(active_key))
                 if attempt == max_stream_failover_attempts - 1:
                     raise throttling_exc
                 continue
             except Exception as exc:
-                await self._handle_key_failure(active_key, is_server_error=False)
+                await self._handle_key_failure(
+                    active_key,
+                    error=exc,
+                    is_server_error=False,
+                )
                 if attempt == max_stream_failover_attempts - 1:
                     logger.error("astream_failed_permanently", error=str(exc))
                     raise
